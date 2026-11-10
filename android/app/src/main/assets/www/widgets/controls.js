@@ -433,7 +433,8 @@ W['meeting-timer'] = {needs:['tick'],create(box,{o}){
   const clock=h('div','deck-track');box.classList.add('control-deck');box.append(h('div','w-title',o.title || 'Meeting timer'),clock);
   let state=store.get(key,{elapsed:0,started:0});
   const persist=()=>store.set(key,state);
-  const start=button(state.started?'Pause':'Start',()=>{if(state.started){state.elapsed+=Date.now()-state.started;state.started=0;}else state.started=Date.now();persist();});
-  box.append(start,button('Reset',()=>{state={elapsed:0,started:0};persist();}));
-  return {update(){const elapsed=state.elapsed+(state.started?Date.now()-state.started:0);clock.textContent=timeText(elapsed);start.textContent=state.started?'Pause':'Start';start.setAttribute('aria-label',start.textContent);clock.classList.toggle('deck-overdue',elapsed>=(o.minutes || 30)*60000);}};
+  const start=button(state.started?'Pause':'Start',()=>{if(state.started){state.elapsed+=Date.now()-state.started;state.started=0;}else state.started=Date.now();persist();render();});
+  box.append(start,button('Reset',()=>{state={elapsed:0,started:0};persist();render();}));
+  function render(){const elapsed=state.elapsed+(state.started?Date.now()-state.started:0);clock.textContent=timeText(elapsed);start.textContent=state.started?'Pause':'Start';start.setAttribute('aria-label',start.textContent);clock.classList.toggle('deck-overdue',elapsed>=(o.minutes || 30)*60000);}
+  render();return {update:render};
 }};
