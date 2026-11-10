@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.3 — 2026-11-10
+
+- Fix the launch crash on Android 9 and 10 (API 28–29), reported in
+  [issue #8](https://github.com/ersinkoc/phonebox/issues/8) by [0z-zy](https://github.com/0z-zy).
+  Full-screen mode now uses legacy immersive sticky flags on these versions; Android 11+ retains the window-insets path.
+- Run full Android debug lint in CI and classify `NewApi` findings as fatal, so unsupported framework calls block
+  both CI and release APK builds. Before the fix, lint reproduced all five unguarded API-30 calls in `hideSystemUi`.
+
 ## 0.7.2 — 2026-11-10
 
 Native Antigravity quotas on Windows, Linux and macOS. Existing layouts and pairing settings are retained.

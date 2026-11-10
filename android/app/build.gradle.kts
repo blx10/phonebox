@@ -17,8 +17,8 @@ android {
         applicationId = "net.oxog.phonebox.deskpanel"
         minSdk = 28
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.7.2"
+        versionCode = 19
+        versionName = "0.7.3"
     }
 
     signingConfigs {
@@ -42,6 +42,11 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    lint {
+        // Unsupported framework calls can crash old phones before the panel opens.
+        fatal += "NewApi"
     }
 
     compileOptions {

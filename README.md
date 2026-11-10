@@ -38,7 +38,12 @@ the pages in a visual editor on the PC: **55 widgets**, **24 templates**, as man
 [Updates](#updates) · [How it works](#how-it-works) · [Security](#security--privacy) · [FAQ](#faq--troubleshooting) ·
 [Development](#development)
 
-## New in 0.7.2
+## New in 0.7.3
+
+Fixes an immediate launch crash on Android 9 and 10. Full-screen mode now uses the compatible immersive API on
+these versions; Android 11+ keeps the existing behavior. Android API compatibility lint now blocks CI and releases.
+
+### Native Antigravity quotas (0.7.2)
 
 Native Antigravity quota monitoring now works without CodexBar, including signed-in `agy` CLI installations on
 Windows. Session and weekly usage come from measured quota data; missing readings are not shown as unused quota.
@@ -54,7 +59,7 @@ These screenshots use made-up demo data. See the [changelog](CHANGELOG.md) for a
 
 ## Quick start
 
-**[Download PhoneBox 0.7.2](https://github.com/ersinkoc/phonebox/releases/tag/v0.7.2)** — signed Android APK and
+**[Download PhoneBox 0.7.3](https://github.com/ersinkoc/phonebox/releases/tag/v0.7.3)** — signed Android APK and
 agents for Windows x64, Linux x64/ARM64 and macOS Apple Silicon/Intel. Agent archives need the matching .NET 10
 runtime (Desktop Runtime on Windows). The release includes SHA-256 checksums and build provenance.
 Existing users can update from Settings; existing layouts and pairing settings are retained.

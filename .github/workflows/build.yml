@@ -28,11 +28,11 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: gradle   # the Gradle distribution and dependencies, so a download hiccup does not fail the build
-      - name: Build debug APK
+      - name: Check Android API compatibility and build debug APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --console=plain
+          ./gradlew lintDebug assembleDebug --no-daemon --console=plain
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: phonebox-apk
