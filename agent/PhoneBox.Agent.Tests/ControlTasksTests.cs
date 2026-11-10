@@ -45,7 +45,15 @@ public sealed class ControlTasksTests
             await tasks.StopAsync();
             Assert.Equal("Stopped",tasks.State("owned"));Assert.False(unrelated.HasExited);
         }
-        finally {if(!unrelated.HasExited)unrelated.Kill(entireProcessTree:true);await unrelated.WaitForExitAsync();Directory.Delete(directory,true);}
+        finally
+        {
+            if(!unrelated.HasExited)unrelated.Kill(entireProcessTree:true);await unrelated.WaitForExitAsync();
+            // Windows can release a terminated descendant's working-directory handle after the parent exits.
+            // Keep asserting cleanup succeeds, while allowing that bounded OS teardown to finish.
+            for(var attempt=0;;attempt++)
+                try {Directory.Delete(directory,true);break;}
+                catch(IOException) when(attempt<20) {await Task.Delay(50);}
+        }
     }
 }
 

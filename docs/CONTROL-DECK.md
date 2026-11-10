@@ -17,13 +17,14 @@ This document tracks implementation and evidence; a catalog entry or demo is not
 | Development / automation | Build/test tasks, dev servers, services, Docker, GitHub workflows, scripts, Home Assistant scenes | Implemented, reusing existing Docker/HA widgets; owned-process stop test preserves unrelated processes; workflow dispatch and service mutations require configured targets |
 | Advanced audio / protocols | Application routing, external mixer, MIDI, OSC, PC-audio listening on the phone | Implemented with explicit dependencies/opt-ins; MIDI/OSC encoding tested; external hardware, Voicemeeter and listening playback require separate live validation |
 | Product integration | Widget catalog/options, setup editor, templates, phone/LAN proxy, demo, documentation | 113 widgets and 30 templates; private settings/token routes excluded from LAN; 40 browser tests pass, including settings persistence and portrait/landscape layout |
-| Validation | Unit/API tests, browser interactions, native Windows checks, Android lint/build, release/installed proof | 244 .NET tests, 40 browser tests, Android lintDebug/assembleDebug, both .NET target builds and installer regression checks pass; release/installation require the published-artifact checks below |
+| Validation | Unit/API tests, browser interactions, native Windows checks, Android lint/build, release/installed proof | 245 .NET tests, 40 browser tests, Android lintDebug/assembleDebug, both .NET target builds and installer regression checks pass; release/installation require the published-artifact checks below |
 
 ## Local verification (2026-11-10)
 
-- Both .NET targets compile with zero warnings and zero errors; the full .NET suite passes 244 tests. An earlier
+- Both .NET targets compile with zero warnings and zero errors; the full .NET suite passes 245 tests. An earlier
   concurrent build run hit the existing PowerShell child-startup timeout test; its isolated rerun and the final full
   suite passed. The test was not skipped or weakened. OBS tests also cover the explicit loading response during slow discovery and wait for the measured controls before asserting their contents.
+- HTTP fixtures serialize port allocation/start and use distinct ports; a sixteen-listener contention test covers parallel startup. Owned-process fixture cleanup waits for bounded Windows descendant handle teardown.
 - All 40 Playwright tests pass, including application fader isolation, output selection, PTT release, disabled
   unsupported controls, OBS mute, Spotify queue, persistent meeting timers, private settings/public-config separation,
   catalog construction and 780px/360px layouts. Screenshots were inspected for both orientations.

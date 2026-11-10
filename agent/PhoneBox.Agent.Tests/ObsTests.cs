@@ -14,7 +14,7 @@ public sealed class ObsTests : IDisposable
     private const string Salt = "lM1GncleQOaCu9lT1yeUZhFYnqhsLLP1G5lAGo3ixaI=";
     private const string Challenge = "+IxH4CnCiqpX1rM9scsNynZzbOe4KhDeYcTNS3PDaeY=";
 
-    private readonly HttpListener _server = new();
+    private readonly HttpListener _server;
     private readonly string _ws;
     private readonly string _configPath = Path.Combine(Path.GetTempPath(), $"phonebox-obs-{Guid.NewGuid():N}.json");
     private readonly List<string> _requests = [];
@@ -24,10 +24,8 @@ public sealed class ObsTests : IDisposable
 
     public ObsTests()
     {
-        var port = TestPorts.Free();
-        _server.Prefixes.Add($"http://127.0.0.1:{port}/");
-        _server.Start();
-        _ws = $"ws://127.0.0.1:{port}/";
+        _server = TestPorts.Listen();
+        _ws = _server.Prefixes.Single().Replace("http://", "ws://", StringComparison.Ordinal);
         _ = Task.Run(Serve);
     }
 

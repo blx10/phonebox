@@ -8,7 +8,7 @@ using Xunit;
 /// <summary>Talks to a fake Home Assistant: states are filtered to the widgets' entities, switching maps to services.</summary>
 public sealed class HomeAssistantTests : IDisposable
 {
-    private readonly HttpListener _server = new();
+    private readonly HttpListener _server;
     private readonly string _url;
     private readonly string _configPath = Path.Combine(Path.GetTempPath(), $"phonebox-test-{Guid.NewGuid():N}.json");
     private readonly List<string> _calls = [];
@@ -16,10 +16,8 @@ public sealed class HomeAssistantTests : IDisposable
 
     public HomeAssistantTests()
     {
-        var port = TestPorts.Free();
-        _url = $"http://127.0.0.1:{port}";
-        _server.Prefixes.Add(_url + "/");
-        _server.Start();
+        _server = TestPorts.Listen();
+        _url = _server.Prefixes.Single().TrimEnd('/');
         _loop = Task.Run(Serve);
     }
 
