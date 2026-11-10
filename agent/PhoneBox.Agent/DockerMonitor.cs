@@ -34,11 +34,25 @@ public sealed class DockerMonitor(ConfigStore config, ILogger<DockerMonitor> log
     {
         Interlocked.Exchange(ref _lastRequest, Environment.TickCount64);
         if (_snap.Updated == 0)
-        {
-            try { await Refresh(ct); }
-            catch (Exception ex) when (!ct.IsCancellationRequested) { _snap = _snap with { Error = ex.Message }; }
-        }
+            await Task.WhenAny(RefreshColdCacheAsync(), Task.Delay(2000, ct));
         return _snap;
+    }
+
+    private async Task RefreshColdCacheAsync()
+    {
+        if (!await _gate.WaitAsync(TimeSpan.FromSeconds(2))) return;
+        try
+        {
+            if (_snap.Updated == 0)
+            {
+                try { await RefreshCore(CancellationToken.None); }
+                catch (Exception ex) { _snap = _snap with { Error = ex.Message }; }
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -58,54 +72,57 @@ public sealed class DockerMonitor(ConfigStore config, ILogger<DockerMonitor> log
     private async Task Refresh(CancellationToken ct)
     {
         if (!await _gate.WaitAsync(0, ct)) return;
-        try
-        {
-            var clis = Clis.Value;
-            if (clis.Count == 0)
-            {
-                _snap = new(false, "Docker is not installed (no docker or podman command found)", [], Now());
-                return;
-            }
+        try { await RefreshCore(ct); }
+        finally { _gate.Release(); }
+    }
 
-            var cli = _activeCli ?? clis[0];
-            var fmt = FormatArg(cli);
-            var (code, output, error) = await Run(cli, ct, "ps", "-a", "--format", fmt);
-            if (code != 0 && clis.Count > 1)
+    private async Task RefreshCore(CancellationToken ct)
+    {
+        var clis = Clis.Value;
+        if (clis.Count == 0)
+        {
+            _snap = new(false, "Docker is not installed (no docker or podman command found)", [], Now());
+            return;
+        }
+
+        var cli = _activeCli ?? clis[0];
+        var fmt = FormatArg(cli);
+        var (code, output, error) = await Run(cli, ct, "ps", "-a", "--format", fmt);
+        if (code != 0 && clis.Count > 1)
+        {
+            foreach (var alt in clis.Where(c => c != cli))
             {
-                foreach (var alt in clis.Where(c => c != cli))
+                var altFmt = FormatArg(alt);
+                var res = await Run(alt, ct, "ps", "-a", "--format", altFmt);
+                if (res.Code == 0)
                 {
-                    var altFmt = FormatArg(alt);
-                    var res = await Run(alt, ct, "ps", "-a", "--format", altFmt);
-                    if (res.Code == 0)
-                    {
-                        cli = _activeCli = alt;
-                        fmt = altFmt;
-                        (code, output, error) = res;
-                        break;
-                    }
+                    cli = _activeCli = alt;
+                    fmt = altFmt;
+                    (code, output, error) = res;
+                    break;
                 }
             }
-            else if (code == 0) _activeCli = cli;
-
-            if (code != 0)
-            {
-                _snap = new(true, FirstLine(error) ?? "docker ps failed", _snap.Containers, Now());
-                return;
-            }
-
-            if (DateTime.UtcNow - _statsAt > TimeSpan.FromSeconds(15))
-            {
-                _statsAt = DateTime.UtcNow;
-                var (sc, so, _) = await Run(cli, ct, "stats", "--no-stream", "--format", fmt);
-                if (sc == 0) _stats = ParseStats(so);
-            }
-
-            var list = ParseContainers(output, _stats);
-            _snap = new(true, null, list, Now());
         }
-        finally
+        else if (code == 0) _activeCli = cli;
+
+        if (code != 0)
         {
-            _gate.Release();
+            _snap = new(true, FirstLine(error) ?? "docker ps failed", _snap.Containers, Now());
+            return;
+        }
+
+        var list = ParseContainers(output, _stats);
+        _snap = new(true, null, list, Now());
+
+        if (DateTime.UtcNow - _statsAt > TimeSpan.FromSeconds(15))
+        {
+            var (sc, so, _) = await Run(cli, ct, "stats", "--no-stream", "--format", fmt);
+            _statsAt = DateTime.UtcNow;
+            if (sc == 0)
+            {
+                _stats = ParseStats(so);
+                _snap = new(true, null, ParseContainers(output, _stats), Now());
+            }
         }
     }
 
