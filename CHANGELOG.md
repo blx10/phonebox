@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.2 — 2026-11-10
+
+- Fix webhook JSON payloads with nonnumeric `ttl` fields causing an unhandled exception. Only integer payload TTLs
+  set an expiration; other field values remain ordinary data, and an explicit request TTL still takes priority.
+- Enforce the 64 KB webhook body limit in bytes even for chunked requests without Content-Length, including
+  multibyte UTF-8 text. Oversized bodies are rejected before any pushed value is stored.
+- Add eight regression cases covering TTL types, explicit overrides and ASCII/multibyte body boundaries.
+
 ## 0.9.1 — 2026-11-10
 
 - Fix stale Windows media cover art after switching YouTube/Chromium tracks ([#9](https://github.com/ersinkoc/phonebox/issues/9)).

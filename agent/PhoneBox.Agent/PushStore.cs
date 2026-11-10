@@ -74,7 +74,8 @@ public sealed partial class PushStore
         PurgeExpired(); // expired values do not count against the limit
         if (!_items.ContainsKey(key) && _items.Count >= MaxItems) return $"too many keys (max {MaxItems}); delete some first";
         // {"ttl": 300, ...} inside the payload works too
-        if (ttlSec is null && data.ValueKind == JsonValueKind.Object && data.TryGetProperty("ttl", out var t) && t.TryGetInt32(out var tt)) ttlSec = tt;
+        if (ttlSec is null && data.ValueKind == JsonValueKind.Object && data.TryGetProperty("ttl", out var t)
+            && t.ValueKind == JsonValueKind.Number && t.TryGetInt32(out var tt)) ttlSec = tt;
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         _items[key] = new PushItem(data.Clone(), now, ttlSec is > 0 ? now + ttlSec.Value * 1000L : null);
         Changed();
@@ -150,11 +151,18 @@ public sealed partial class PushStore
     {
         if (req.Query.TryGetValue("value", out var qv)) return (Parse(qv.ToString()), null);
         if (req.ContentLength > MaxBytes) return (null, $"body too large (max {MaxBytes / 1024} KB)");
-        var buf = new char[MaxBytes + 1];
-        using var r = new StreamReader(req.Body);
-        var n = await r.ReadBlockAsync(buf, 0, buf.Length);
+        // Content-Length can be absent (chunked requests); enforce the same byte limit in either case.
+        var buf = new byte[MaxBytes + 1];
+        var n = 0;
+        while (n < buf.Length)
+        {
+            var count = await req.Body.ReadAsync(buf.AsMemory(n), req.HttpContext.RequestAborted);
+            if (count == 0) break;
+            n += count;
+        }
         if (n > MaxBytes) return (null, $"body too large (max {MaxBytes / 1024} KB)");
-        var text = new string(buf, 0, n).Trim();
+        using var r = new StreamReader(new MemoryStream(buf, 0, n));
+        var text = (await r.ReadToEndAsync()).Trim();
         if (req.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
         {
             try { return (JsonDocument.Parse(text == "" ? "null" : text).RootElement.Clone(), null); }
