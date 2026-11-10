@@ -784,6 +784,11 @@ function widgetSummary(w) {
     case 'checklist': return `${o.title || 'Today'} · ${(o.items || d.options[1].default).length} items`;
     case 'exchange': return `${o.base || 'EUR'} → ${(o.symbols || d.options[1].default).join(', ')}`;
     case 'crypto': return (o.coins || d.options[0].default).join(', ');
+    case 'radio': {
+      const radios = getOrderedRadioActions(w);
+      const activeCount = radios.filter((r) => isRadioEnabledForWidget(w, r)).length;
+      return `${activeCount}/${radios.length} active`;
+    }
     case 'image': return o.caption || (o.url || 'no address').replace(/^https?:\/\//, '').slice(0, 40);
     case 'stack': {
       const list = getStackItems(w, { key: 'widgets', default: d.options?.find((x) => x.key === 'widgets')?.default });
@@ -1263,9 +1268,452 @@ function renderStackWidgetsOption(w, o) {
   );
 }
 
+let expandedRadioIndex = -1;
+let radioSearchQuery = '';
+let openRadioCountry = 'tr';
+let openRadioLimit = 25;
+let openRadioSource = 'popular';
+let openRadioVerify = true;
+let openRadioReplace = false;
+let openRadioCountriesCache = null;
+
+function getOrderedRadioActions(w) {
+  const actions = (cfg?.controls?.actions || []).filter((a) => a && a.kind === 'radio');
+  const opts = w?.options || {};
+  let list = opts.ids?.length ? actions.filter((a) => opts.ids.includes(a.id)) : [...actions];
+  if (Array.isArray(opts.order) && opts.order.length) {
+    const pos = new Map(opts.order.map((id, idx) => [id, idx]));
+    list.sort((a, b) => (pos.has(a.id) ? pos.get(a.id) : 1e6) - (pos.has(b.id) ? pos.get(b.id) : 1e6));
+  }
+  return list;
+}
+
+function isRadioEnabledForWidget(w, a) {
+  if (!a || a.enabled === false) return false;
+  const off = w?.options?.disabledIds;
+  return !(Array.isArray(off) && off.includes(a.id));
+}
+
+function commitRadioStationsChange(w, nextRadios, rerender = true) {
+  cfg.controls ??= { actions: [], profiles: [] };
+  cfg.controls.actions ??= [];
+  const otherActions = cfg.controls.actions.filter((a) => !a || a.kind !== 'radio');
+  const hasScopedIds = Array.isArray(w.options?.ids) && w.options.ids.length > 0;
+  if (hasScopedIds) {
+    const nextMap = new Map(nextRadios.map((r) => [r.id, r]));
+    const untouchedRadios = cfg.controls.actions.filter((a) => a?.kind === 'radio' && !nextMap.has(a.id));
+    cfg.controls.actions = [...otherActions, ...nextRadios, ...untouchedRadios];
+    w.options.ids = nextRadios.map((r) => r.id);
+  } else {
+    cfg.controls.actions = [...otherActions, ...nextRadios];
+  }
+  w.options ??= {};
+  w.options.order = nextRadios.map((r) => r.id);
+  const offSet = new Set(Array.isArray(w.options.disabledIds) ? w.options.disabledIds : []);
+  w.options.disabledIds = nextRadios.filter((r) => r.enabled === false || offSet.has(r.id)).map((r) => r.id);
+  delete w.options.stations;
+  changed();
+  renderCanvas();
+  renderDeck();
+  if (rerender) renderWidgetEditor();
+}
+
+function slugifyRadioId(label, usedIds) {
+  let base = 'radio-' + String(label || 'station')
+    .toLowerCase()
+    .replace(/ğ/g, 'g').replace(/ü/g, 'u').replace(/ş/g, 's')
+    .replace(/ı/g, 'i').replace(/ö/g, 'o').replace(/ç/g, 'c')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  if (base === 'radio-') base = 'radio-station';
+  let candidate = base;
+  let n = 2;
+  while (usedIds.has(candidate)) candidate = `${base}-${n++}`;
+  usedIds.add(candidate);
+  return candidate;
+}
+
+function renderRadioStationsOption(w, o) {
+  const radios = getOrderedRadioActions(w);
+  w.options ??= {};
+  const disabledSet = new Set(Array.isArray(w.options.disabledIds) ? w.options.disabledIds : []);
+
+  const setStationEnabled = (station, on) => {
+    station.enabled = on;
+    if (on) disabledSet.delete(station.id);
+    else disabledSet.add(station.id);
+    w.options.disabledIds = [...disabledSet];
+    commitRadioStationsChange(w, radios, true);
+  };
+
+  const moveItem = (from, to) => {
+    if (to < 0 || to >= radios.length || from === to) return;
+    const [moved] = radios.splice(from, 1);
+    radios.splice(to, 0, moved);
+    if (expandedRadioIndex === from) expandedRadioIndex = to;
+    else if (from < expandedRadioIndex && to >= expandedRadioIndex) expandedRadioIndex--;
+    else if (from > expandedRadioIndex && to <= expandedRadioIndex) expandedRadioIndex++;
+    commitRadioStationsChange(w, radios, true);
+  };
+
+  const removeStation = (idx) => {
+    const removed = radios[idx];
+    if (!removed) return;
+    radios.splice(idx, 1);
+    disabledSet.delete(removed.id);
+    w.options.disabledIds = [...disabledSet];
+    if (expandedRadioIndex === idx) expandedRadioIndex = -1;
+    else if (expandedRadioIndex > idx) expandedRadioIndex--;
+    commitRadioStationsChange(w, radios, true);
+  };
+
+  const addManualStation = () => {
+    const used = new Set((cfg.controls?.actions || []).map((a) => a?.id).filter(Boolean));
+    const id = slugifyRadioId('New Station', used);
+    radios.unshift({
+      id,
+      label: 'New Radio Station',
+      kind: 'radio',
+      target: 'https://',
+      icon: '',
+      value: 80,
+      enabled: true
+    });
+    expandedRadioIndex = 0;
+    commitRadioStationsChange(w, radios, true);
+  };
+
+  const activeCount = radios.filter((r) => isRadioEnabledForWidget(w, r)).length;
+  const q = radioSearchQuery.trim().toLowerCase();
+
+  const rowsAndConfigs = [];
+  radios.forEach((item, idx) => {
+    if (q && !`${item.label || ''} ${item.id || ''} ${item.target || ''}`.toLowerCase().includes(q)) return;
+    const isEnabled = isRadioEnabledForWidget(w, item);
+    const isExpanded = expandedRadioIndex === idx;
+
+    const logoImg = h('img', {
+      src: item.icon || ('/api/controls/radio-logo?id=' + encodeURIComponent(item.id)),
+      alt: '',
+      style: { width: '24px', height: '24px', borderRadius: '6px', objectFit: 'contain', background: '#f8fafc', padding: '2px', flexShrink: '0' },
+      onerror: (e) => { e.target.style.display = 'none'; }
+    });
+
+    const row = h('div', {
+      class: 'stack-row' + (isEnabled ? '' : ' off') + (isExpanded ? ' expanded' : ''),
+      draggable: !q,
+      ondragstart: (e) => {
+        if (q) return;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', 'radio:' + idx);
+        row.classList.add('dragging');
+      },
+      ondragend: () => {
+        row.classList.remove('dragging');
+        document.querySelectorAll('.stack-row.over').forEach((el) => el.classList.remove('over'));
+      },
+      ondragover: (e) => {
+        if (q) return;
+        e.preventDefault();
+        row.classList.add('over');
+      },
+      ondragleave: () => row.classList.remove('over'),
+      ondrop: (e) => {
+        if (q) return;
+        e.preventDefault();
+        e.stopPropagation();
+        row.classList.remove('over');
+        const raw = e.dataTransfer.getData('text/plain') || '';
+        if (raw.startsWith('radio:')) moveItem(+raw.slice(6), idx);
+      }
+    },
+      h('span', { class: 'sr-grip', title: q ? 'Clear search to drag' : 'Drag to reorder' }, '⠿'),
+      h('input', {
+        type: 'checkbox',
+        class: 'sr-chk',
+        checked: isEnabled,
+        title: isEnabled ? 'Active (uncheck to disable)' : 'Disabled (check to enable)',
+        onclick: (e) => e.stopPropagation(),
+        onchange: (e) => setStationEnabled(item, e.target.checked)
+      }),
+      logoImg,
+      h('div', {
+        class: 'sr-main',
+        title: 'Click to edit stream URL or logo',
+        onclick: () => {
+          expandedRadioIndex = expandedRadioIndex === idx ? -1 : idx;
+          renderWidgetEditor();
+        }
+      },
+        h('span', { class: 'sr-title' }, `${idx + 1}. ${item.label || item.id}`),
+        h('span', { class: 'sr-sub' }, (item.target || '').replace(/^https?:\/\//, '').slice(0, 46) || 'No stream URL')
+      ),
+      h('div', { class: 'sr-actions' },
+        h('button', { type: 'button', class: 'icon-btn', title: 'Edit', onclick: () => { expandedRadioIndex = expandedRadioIndex === idx ? -1 : idx; renderWidgetEditor(); } }, isExpanded ? '▾' : '✎'),
+        h('button', { type: 'button', class: 'icon-btn', title: 'Move up', disabled: idx === 0, onclick: () => moveItem(idx, idx - 1) }, '▲'),
+        h('button', { type: 'button', class: 'icon-btn', title: 'Move down', disabled: idx === radios.length - 1, onclick: () => moveItem(idx, idx + 1) }, '▼'),
+        h('button', { type: 'button', class: 'icon-btn danger', title: 'Delete station', onclick: () => removeStation(idx) }, '✕')
+      )
+    );
+    rowsAndConfigs.push(row);
+
+    if (isExpanded) {
+      const subBox = h('div', { class: 'stack-sub-config' },
+        h('div', { class: 'sub-head' },
+          h('span', {}, `📻 ${item.label || item.id}`),
+          h('button', { type: 'button', class: 'btn sm', onclick: () => { expandedRadioIndex = -1; renderWidgetEditor(); } }, 'Close')
+        ),
+        h('div', { class: 'field' },
+          h('label', {}, 'Station name'),
+          h('input', { type: 'text', value: item.label || '', oninput: (e) => { item.label = e.target.value; changed(); renderCanvas(); } })
+        ),
+        h('div', { class: 'field' },
+          h('label', {}, 'Stream URL (HTTP / AAC / MP3 / .m3u8)'),
+          h('input', { type: 'text', value: item.target || '', oninput: (e) => { item.target = e.target.value.trim(); changed(); } })
+        ),
+        h('div', { class: 'field' },
+          h('label', {}, 'Logo URL (optional — resolved automatically when blank)'),
+          h('input', { type: 'text', value: item.icon || '', placeholder: 'https://…/logo.png', oninput: (e) => { item.icon = e.target.value.trim(); changed(); } })
+        )
+      );
+      rowsAndConfigs.push(subBox);
+    }
+  });
+
+  const searchInput = h('input', {
+    type: 'text',
+    placeholder: 'Search stations…',
+    value: radioSearchQuery,
+    style: { flex: '1', minWidth: '120px' },
+    oninput: (e) => {
+      radioSearchQuery = e.target.value;
+      const pos = e.target.selectionStart;
+      renderWidgetEditor();
+      const nextInput = document.querySelector('[data-radio-search="1"]');
+      if (nextInput) { nextInput.focus(); try { nextInput.setSelectionRange(pos, pos); } catch (_) {} }
+    }
+  });
+  searchInput.dataset.radioSearch = '1';
+
+  const toolbar = h('div', { class: 'row', style: { gap: '6px', marginBottom: '6px', flexWrap: 'wrap' } },
+    h('button', { type: 'button', class: 'btn sm', onclick: addManualStation }, '＋ Add station'),
+    h('button', { type: 'button', class: 'btn sm', onclick: () => {
+      radios.forEach((r) => { r.enabled = true; });
+      w.options.disabledIds = [];
+      commitRadioStationsChange(w, radios, true);
+    } }, 'Enable all'),
+    h('button', { type: 'button', class: 'btn sm', onclick: () => {
+      radios.forEach((r) => { r.enabled = false; });
+      w.options.disabledIds = radios.map((r) => r.id);
+      commitRadioStationsChange(w, radios, true);
+    } }, 'Disable all')
+  );
+
+  const countrySelect = h('select', {
+    style: { flex: '1', minWidth: '150px' },
+    onchange: (e) => { openRadioCountry = e.target.value; }
+  });
+  const populateCountries = (list) => {
+    countrySelect.replaceChildren(...list.map((c) =>
+      h('option', { value: c.code, selected: c.code === openRadioCountry },
+        `${c.flag || '🌐'} ${c.name}${c.stationCount ? ` (${c.stationCount})` : ''}`)
+    ));
+  };
+  if (openRadioCountriesCache) {
+    populateCountries(openRadioCountriesCache);
+  } else {
+    populateCountries([
+      { code: 'tr', name: 'Türkiye', flag: '🇹🇷' },
+      { code: 'de', name: 'Germany', flag: '🇩🇪' },
+      { code: 'gb', name: 'United Kingdom', flag: '🇬🇧' },
+      { code: 'us', name: 'United States', flag: '🇺🇸' },
+      { code: 'fr', name: 'France', flag: '🇫🇷' },
+      { code: 'nl', name: 'Netherlands', flag: '🇳🇱' },
+      { code: 'az', name: 'Azerbaijan', flag: '🇦🇿' },
+    ]);
+    fetch('/api/controls/radio-directory/countries')
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        const list = Array.isArray(data) ? data : data?.countries;
+        if (Array.isArray(list) && list.length) {
+          openRadioCountriesCache = list;
+          populateCountries(list);
+        }
+      })
+      .catch(() => {});
+  }
+
+  const limitSelect = h('select', {
+    title: 'Maximum stations to import',
+    style: { width: '92px' },
+    onchange: (e) => { openRadioLimit = +e.target.value || 25; }
+  },
+    ...[15, 25, 40, 60, 100].map((n) => h('option', { value: String(n), selected: openRadioLimit === n }, `${n} items`))
+  );
+
+  const sourceSelect = h('select', {
+    title: 'Open-source directory mode',
+    style: { width: '100%', marginBottom: '6px' },
+    onchange: (e) => { openRadioSource = e.target.value; }
+  },
+    h('option', { value: 'popular', selected: openRadioSource === 'popular' }, '⭐ Most Listened First (Wikipedia + Audience Reach + Clicks)'),
+    h('option', { value: 'national', selected: openRadioSource === 'national' }, '🏛️ National & Public Broadcasters Only (RTÜK R1 · Public Networks)'),
+    h('option', { value: 'radiobrowser', selected: openRadioSource === 'radiobrowser' }, '📊 Raw Click Count (radio-browser.info)')
+  );
+
+  const statusLine = h('div', { class: 'hint', style: { marginTop: '6px', minHeight: '16px' } }, '');
+
+  const importBtn = h('button', {
+    type: 'button',
+    class: 'btn sm primary',
+    onclick: async () => {
+      importBtn.disabled = true;
+      repairBtn.disabled = true;
+      statusLine.textContent = `Fetching and verifying ${openRadioCountry.toUpperCase()} stations from open sources…`;
+      try {
+        const url = `/api/controls/radio-directory/stations?country=${encodeURIComponent(openRadioCountry)}&limit=${openRadioLimit}&verify=${openRadioVerify}&source=${encodeURIComponent(openRadioSource)}`;
+        const r = await fetch(url);
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || 'Could not fetch station directory');
+        const incoming = Array.isArray(j.stations) ? j.stations : [];
+        if (!incoming.length) {
+          toast('No working stations found for this country', true);
+          statusLine.textContent = 'No matching stations found.';
+          return;
+        }
+        const baseList = openRadioReplace ? [] : [...radios];
+        const existingTargets = new Set(baseList.map((x) => (x.target || '').trim().toLowerCase()));
+        const existingNames = new Set(baseList.map((x) => (x.label || '').trim().toLowerCase()));
+        const usedIds = new Set((cfg.controls?.actions || []).map((a) => a?.id).filter(Boolean));
+        if (openRadioReplace) {
+          radios.forEach((old) => usedIds.delete(old.id));
+          w.options.disabledIds = [];
+        }
+        let added = 0;
+        for (const st of incoming) {
+          const cleanUrl = String(st.url || '').trim();
+          const cleanName = String(st.name || '').trim();
+          if (!cleanUrl || !cleanName) continue;
+          if (existingTargets.has(cleanUrl.toLowerCase()) || existingNames.has(cleanName.toLowerCase())) continue;
+          existingTargets.add(cleanUrl.toLowerCase());
+          existingNames.add(cleanName.toLowerCase());
+          baseList.push({
+            id: slugifyRadioId(cleanName, usedIds),
+            label: cleanName,
+            kind: 'radio',
+            target: cleanUrl,
+            icon: st.logo || '',
+            value: 80,
+            enabled: true
+          });
+          added++;
+        }
+        commitRadioStationsChange(w, baseList, true);
+        toast(openRadioReplace ? `Loaded ${added} stations` : `Added ${added} new stations`);
+      } catch (err) {
+        toast(err.message || 'Directory import failed', true);
+        statusLine.textContent = err.message || 'Import failed.';
+      } finally {
+        importBtn.disabled = false;
+        repairBtn.disabled = false;
+      }
+    }
+  }, '🌐 Import Country Stations');
+
+  const repairBtn = h('button', {
+    type: 'button',
+    class: 'btn sm',
+    title: 'Tests all stations, repairs broken streams from open sources, and disables dead streams without a replacement.',
+    onclick: async () => {
+      if (!radios.length) { toast('Radio list is empty', true); return; }
+      importBtn.disabled = true;
+      repairBtn.disabled = true;
+      statusLine.textContent = `Testing ${radios.length} radio streams (may take 5–15s)…`;
+      try {
+        const payload = radios.map((r) => ({ id: r.id, label: r.label || r.id, target: r.target || '' }));
+        const r = await fetch(`/api/controls/radio-directory/repair?country=${encodeURIComponent(openRadioCountry)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || 'Stream verification failed');
+        const items = Array.isArray(j.results) ? j.results : (Array.isArray(j.items) ? j.items : []);
+        let okCount = 0, fixedCount = 0, disabledCount = 0;
+        for (const res of items) {
+          const target = radios.find((x) => x.id === res.id);
+          if (!target) continue;
+          if (res.ok) {
+            okCount++;
+          } else if (res.replacementUrl) {
+            target.target = res.replacementUrl;
+            if (!target.icon && res.replacementLogo) target.icon = res.replacementLogo;
+            target.enabled = true;
+            disabledSet.delete(target.id);
+            fixedCount++;
+          } else {
+            target.enabled = false;
+            disabledSet.add(target.id);
+            disabledCount++;
+          }
+        }
+        w.options.disabledIds = [...disabledSet];
+        commitRadioStationsChange(w, radios, true);
+        toast(`${okCount} working · ${fixedCount} repaired · ${disabledCount} disabled`);
+      } catch (err) {
+        toast(err.message || 'Stream repair failed', true);
+        statusLine.textContent = err.message || 'Repair failed.';
+      } finally {
+        importBtn.disabled = false;
+        repairBtn.disabled = false;
+      }
+    }
+  }, '🔧 Verify & Repair Broken');
+
+  const openSourcesBox = h('div', {
+    style: {
+      marginTop: '10px',
+      padding: '10px',
+      borderRadius: '8px',
+      border: '1px solid var(--line)',
+      background: 'var(--panel-2)'
+    }
+  },
+    h('div', { style: { fontWeight: '600', fontSize: '12.5px', marginBottom: '2px' } }, '🌐 Add Stations from Open Sources'),
+    h('span', { class: 'hint', style: { display: 'block', marginBottom: '8px' } },
+      'Sources: radio-browser.info (CC0) · Wikipedia & national broadcaster reach · iprd & radio-playlists (MIT)'),
+    h('div', { class: 'row', style: { gap: '6px', marginBottom: '6px' } }, countrySelect, limitSelect),
+    sourceSelect,
+    h('label', { class: 'check', style: { marginBottom: '4px', fontSize: '12px' } },
+      h('input', { type: 'checkbox', checked: openRadioVerify, onchange: (e) => { openRadioVerify = e.target.checked; } }),
+      'Verify and import working streams only'),
+    h('label', { class: 'check', style: { marginBottom: '8px', fontSize: '12px' } },
+      h('input', { type: 'checkbox', checked: openRadioReplace, onchange: (e) => { openRadioReplace = e.target.checked; } }),
+      'Replace existing station list (otherwise appends)'),
+    h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } }, importBtn, repairBtn),
+    statusLine
+  );
+
+  return h('div', { class: 'field' },
+    h('label', {}, `${o.label || 'Radio stations'} (${activeCount}/${radios.length} active)`),
+    h('span', { class: 'hint', style: { margin: '2px 0 8px', display: 'block' } },
+      'Uncheck to disable, drag or use ▲/▼ to reorder, and click a station row to edit its name, stream URL, or logo.'),
+    toolbar,
+    searchInput,
+    radios.length
+      ? h('div', { class: 'stack-list', style: { maxHeight: '320px', overflowY: 'auto' } }, ...rowsAndConfigs)
+      : h('p', { class: 'hint', style: { margin: '6px 0' } }, 'No radio stations configured yet. Select a country below to import from open sources.'),
+    openSourcesBox
+  );
+}
+
 function optionField(w, o, onValChange) {
   if (o.type === 'stack-widgets' || (w.type === 'stack' && o.key === 'widgets')) {
     return renderStackWidgetsOption(w, o);
+  }
+  if (o.type === 'radio-stations' || (w.type === 'radio' && o.key === 'stations')) {
+    return renderRadioStationsOption(w, o);
   }
   const v = optVal(w, o);
   const set = (key, val) => {
@@ -1901,7 +2349,9 @@ function renderControlSettings() {
     const box=h('details',{},h('summary',{},a.label || a.id));
     const kind=h('select',{'aria-label':'Control kind'},...Object.keys(hints).map(k=>h('option',{value:k,selected:a.kind===k},k)));
     const hint=h('p',{class:'hint'},hints[a.kind] || 'Select a kind.');kind.onchange=()=>{a.kind=kind.value;hint.textContent=hints[a.kind];changed();};
-    box.append(field('Control ID',a,'id'),field('Control label',a,'label'),h('label',{},'Kind'),kind,hint,field('Target',a,'target'),field('Argument',a,'argument'),field('Device / port / branch',a,'device'),field('Value',a,'value','number'));
+    const enChk=h('input',{type:'checkbox',checked:a.enabled!==false,'aria-label':'Enabled',onchange:()=>{a.enabled=enChk.checked;changed();renderCanvas();}});
+    const enField=h('label',{class:'check',style:{marginBottom:'8px'}},enChk,'Enabled (active)');
+    box.append(enField,field('Control ID',a,'id'),field('Control label',a,'label'),h('label',{},'Kind'),kind,hint,field('Target',a,'target'),field('Icon / logo URL (optional)',a,'icon'),field('Argument',a,'argument'),field('Device / port / branch',a,'device'),field('Value',a,'value','number'));
     const output=h('pre',{style:{maxHeight:'240px',overflow:'auto',whiteSpace:'pre-wrap'}});
     box.append(btn('Show task output',async()=>{const r=await fetch('/api/controls/task-output/'+encodeURIComponent(a.id));if(!r.ok)throw new Error('Output unavailable');output.textContent=await r.text();}),btn('Remove control',()=>{c.actions=c.actions.filter(x=>x!==a);changed();renderActions();}),output);return box;
   }));renderActions();

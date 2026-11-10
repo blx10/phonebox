@@ -25,6 +25,7 @@ public sealed partial class ControlDeck : BackgroundService
     private readonly Dictionary<string, (int Original, int Applied)> _duck = [];
     private int? _duckPercent;
     private readonly Dictionary<string, long> _sleep = [];
+    private readonly RadioDirectory _radioDir;
     private Task? _hardwareJob;
     private long _hardwareAt;
     private IReadOnlyList<DeckMonitor> _monitors = [];
@@ -41,12 +42,13 @@ public sealed partial class ControlDeck : BackgroundService
         return new PortableDeckNative(audio, media);
 #endif
     }
-    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null)
+    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, RadioDirectory? radioDir = null)
     {
         _config = config; _log = log;
         _now = now ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         _tasks = new(config, log);
         _native = native;
+        _radioDir = radioDir ?? new RadioDirectory();
         _ptt = new(id => Audio().Devices.FirstOrDefault(d => d.Id == id && d.Direction == "input")?.Muted,
             (id, muted) => { try { var ok = _native.Device(id, null, muted); Invalidate(); return ok; } catch { return false; } }, () => Environment.TickCount64);
     }
@@ -74,7 +76,7 @@ public sealed partial class ControlDeck : BackgroundService
         {
             platform = AppPaths.Os, audio = Audio(), media, mediaError,
             monitors = _monitors, powerPlans = _plans, midi = _midi, hardwareLoading = _hardwareJob?.IsCompleted == false,
-            actions = c.Controls.Actions.Select(Describe).ToArray(),
+            actions = c.Controls.Actions.Where(a => a.Enabled).Select(Describe).ToArray(),
             shortcuts = c.Shortcuts.Select(DescribeShortcut),
             profiles = c.Controls.Profiles.Select(p => new DeckItem(p.Id, p.Label, "profile")),
             allowListening = c.Controls.AllowListening, allowPower = c.Controls.AllowPower,
@@ -316,11 +318,40 @@ public sealed partial class ControlDeck : BackgroundService
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-        finally { _ptt.Sweep(all: true); RestoreDucking(); lock (_state) foreach (var player in _fades.Keys.ToArray()) RestoreFade(player); await _tasks.StopAsync(); DisposeMixer(); _native.Dispose(); }
+        finally { _ptt.Sweep(all: true); RestoreDucking(); lock (_state) foreach (var player in _fades.Keys.ToArray()) RestoreFade(player); await _tasks.StopAsync(); DisposeMixer(); _native.Dispose(); _radioDir.Dispose(); }
     }
+
+    public override void Dispose()
+    {
+        base.Dispose();
+        _radioDir.Dispose();
+    }
+
+    public Task<IReadOnlyList<GitHubRadioCountry>> GetGitHubRadioCountriesAsync(CancellationToken ct) =>
+        _radioDir.GetCountriesAsync(ct);
+
+    public Task<IReadOnlyList<GitHubRadioStation>> GetGitHubRadioStationsAsync(string country, int limit, bool verify, CancellationToken ct, string? source = "popular") =>
+        _radioDir.GetStationsAsync(country, limit, verify, ct, source);
+
+    public Task<IReadOnlyList<RadioRepairItem>> RepairRadioStationsAsync(IReadOnlyList<RadioRepairInput> items, string country, CancellationToken ct) =>
+        _radioDir.RepairStationsAsync(items, country, ct);
+
+    internal void StopDisabledRadios()
+    {
+        foreach (var disabled in _config.Get().Controls.Actions.Where(a => a.Kind == "radio" && !a.Enabled))
+        {
+            if (_native.ActionState(disabled) == "Playing")
+            {
+                _native.StopSound(disabled.Id);
+                Invalidate();
+            }
+        }
+    }
+
     private async Task Tick(CancellationToken ct)
     {
         await TickSleep(ct);
+        StopDisabledRadios();
         lock (_state)
         {
             if (_duckPercent is null) { RestoreDucking(); return; }

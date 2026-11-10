@@ -83,6 +83,30 @@ app.MapPost("/api/controls/command/{kind}", async (string kind, string? id, stri
 app.MapGet("/api/controls/listen", async (HttpResponse response, ControlDeck deck, CancellationToken ct) => await deck.Listen(response, ct));
 app.MapPost("/api/controls/capture", (ControlDeck deck) => Results.Json(deck.CaptureProfile()));
 app.MapGet("/api/controls/task-output/{id}", (string id, ControlDeck deck) => Results.Text(deck.TaskOutput(id), "text/plain"));
+static async Task<IResult> ServeRadioCountries(ControlDeck deck, CancellationToken ct) =>
+    Results.Json(new { sources = new[] { "radio-browser.info", "wikipedia.org", "AlonDrilich/radio-playlists", "iprd-org/iprd" }, countries = await deck.GetGitHubRadioCountriesAsync(ct) });
+static async Task<IResult> ServeRadioStations(string? country, int? limit, bool? verify, string? source, ControlDeck deck, CancellationToken ct)
+{
+    try
+    {
+        var stations = await deck.GetGitHubRadioStationsAsync(country ?? "tr", limit ?? 50, verify != false, ct, source ?? "popular");
+        return Results.Json(new { country = (country ?? "tr").ToLowerInvariant(), source = (source ?? "popular").ToLowerInvariant(), count = stations.Count, stations });
+    }
+    catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+}
+static async Task<IResult> ServeRadioRepair(HttpRequest req, string? country, ControlDeck deck, CancellationToken ct)
+{
+    var input = await req.ReadFromJsonAsync<List<RadioRepairInput>>(new JsonSerializerOptions(JsonSerializerDefaults.Web), ct) ?? [];
+    if (input.Count > 300) return Results.BadRequest(new { error = "Too many stations in one check" });
+    var results = await deck.RepairRadioStationsAsync(input, country ?? "tr", ct);
+    return Results.Json(new { total = results.Count, okCount = results.Count(r => r.Ok), results });
+}
+app.MapGet("/api/controls/radio-directory/countries", ServeRadioCountries);
+app.MapGet("/api/controls/radio-directory/stations", ServeRadioStations);
+app.MapPost("/api/controls/radio-directory/repair", ServeRadioRepair);
+app.MapGet("/api/controls/radio-github/countries", ServeRadioCountries);
+app.MapGet("/api/controls/radio-github/stations", ServeRadioStations);
+app.MapPost("/api/controls/radio-github/repair", ServeRadioRepair);
 app.MapGet("/api/controls/spotify/state", async (SpotifyControl spotify, CancellationToken ct) => Results.Json(await spotify.Snapshot(ct)));
 app.MapPost("/api/controls/spotify/action/{action}", async (string action, string? id, SpotifyControl spotify, CancellationToken ct) => Results.Json(await spotify.Act(action, id, ct)));
 app.MapGet("/api/controls/spotify/connect", (SpotifyControl spotify) =>

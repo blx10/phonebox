@@ -199,6 +199,16 @@ function actionsView(box, options, type) {
       .filter(item => permitted.includes(item.kind));
     if(type === 'focus-profile' || type === 'meeting-profile') items.push(...(data.profiles || []));
     if (options.ids?.length) items = items.filter(item => options.ids.includes(item.id));
+    if (type === 'radio') {
+      if (options.disabledIds?.length) {
+        const off = new Set(options.disabledIds);
+        items = items.filter(item => !off.has(item.id));
+      }
+      if (options.order?.length) {
+        const pos = new Map(options.order.map((id, idx) => [id, idx]));
+        items = [...items].sort((a, b) => (pos.has(a.id) ? pos.get(a.id) : 1e6) - (pos.has(b.id) ? pos.get(b.id) : 1e6));
+      }
+    }
     const key = JSON.stringify(items); if (key === signature) return; signature = key;
     if (!items.length) { empty(grid, 'Assign controls in the computer’s Control Deck settings'); return; }
     grid.replaceChildren(...items.map(item => {
