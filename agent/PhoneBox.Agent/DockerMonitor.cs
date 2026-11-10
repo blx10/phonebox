@@ -116,8 +116,9 @@ public sealed class DockerMonitor(ConfigStore config, ILogger<DockerMonitor> log
 
         if (DateTime.UtcNow - _statsAt > TimeSpan.FromSeconds(15))
         {
-            var (sc, so, _) = await Run(cli, ct, "stats", "--no-stream", "--format", fmt);
+            // Stamp before the call so a stats timeout does not make every later poll wait for it again.
             _statsAt = DateTime.UtcNow;
+            var (sc, so, _) = await Run(cli, ct, "stats", "--no-stream", "--format", fmt);
             if (sc == 0)
             {
                 _stats = ParseStats(so);
@@ -203,7 +204,14 @@ public sealed class DockerMonitor(ConfigStore config, ILogger<DockerMonitor> log
         log.LogInformation("docker {Action} {Id}: {Result}", action, id, code == 0 ? "ok" : error);
         _statsAt = DateTime.MinValue;
         Interlocked.Exchange(ref _lastRequest, Environment.TickCount64);
-        try { await Refresh(CancellationToken.None); } catch { }
+        // Wait for an in-flight poll instead of skipping, so the phone sees the new state right after the action.
+        // The bound is longer than Run's 20 s timeout, so a stuck poll cannot hang the request forever.
+        if (await _gate.WaitAsync(TimeSpan.FromSeconds(25)))
+        {
+            try { await RefreshCore(CancellationToken.None); }
+            catch { }
+            finally { _gate.Release(); }
+        }
         return code == 0 ? null : FirstLine(error) ?? $"docker {action} failed";
     }
 
@@ -219,8 +227,12 @@ public sealed class DockerMonitor(ConfigStore config, ILogger<DockerMonitor> log
         };
         if (!OperatingSystem.IsWindows())
         {
+            // GUI-launched agents often lack Homebrew in PATH, which podman/docker helpers need.
+            // Append only missing directories so the user's own lookup order is preserved.
             var path = Environment.GetEnvironmentVariable("PATH") ?? "/usr/bin:/bin";
-            if (!path.Contains("/opt/homebrew/bin")) path = "/opt/homebrew/bin:/usr/local/bin:" + path;
+            var parts = path.Split(':', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var dir in new[] { "/opt/homebrew/bin", "/usr/local/bin" })
+                if (!parts.Contains(dir)) path += ":" + dir;
             psi.Environment["PATH"] = path;
         }
         foreach (var a in args) psi.ArgumentList.Add(a);
