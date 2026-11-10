@@ -1111,6 +1111,46 @@ pager.addEventListener('pointerdown', (e) => {
 pager.addEventListener('pointermove', (e) => { if (pressAt && Math.hypot(e.clientX - pressAt[0], e.clientY - pressAt[1]) > 12) { clearTimeout(pressTimer); pressAt = null; } });
 ['pointerup', 'pointercancel'].forEach((ev) => pager.addEventListener(ev, () => { clearTimeout(pressTimer); pressAt = null; }));
 
+// Edge swipe wrap-around: swiping left on the last page wraps to the first page,
+// and swiping right on the first page wraps to the last page.
+let swipeStartX = 0;
+let swipeStartY = 0;
+let swipeStartPage = 0;
+let swipeStartTime = 0;
+let swipeTracking = false;
+
+pager.addEventListener('touchstart', (e) => {
+  if (e.touches.length !== 1 || pages.length < 2) return;
+  swipeStartX = e.touches[0].clientX;
+  swipeStartY = e.touches[0].clientY;
+  swipeStartPage = curPage;
+  swipeStartTime = Date.now();
+  swipeTracking = true;
+}, { passive: true });
+
+pager.addEventListener('touchend', (e) => {
+  if (!swipeTracking || !e.changedTouches || e.changedTouches.length !== 1 || pages.length < 2) {
+    swipeTracking = false;
+    return;
+  }
+  swipeTracking = false;
+  const dx = e.changedTouches[0].clientX - swipeStartX;
+  const dy = e.changedTouches[0].clientY - swipeStartY;
+  const dt = Date.now() - swipeStartTime;
+
+  if (dt < 700 && Math.abs(dx) >= 40 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+    if (dx < 0 && swipeStartPage === pages.length - 1 && curPage === pages.length - 1) {
+      haptic();
+      goPage(0);
+    } else if (dx > 0 && swipeStartPage === 0 && curPage === 0) {
+      haptic();
+      goPage(pages.length - 1);
+    }
+  }
+}, { passive: true });
+
+pager.addEventListener('touchcancel', () => { swipeTracking = false; }, { passive: true });
+
 /** Called by the Android shell (volume keys) and by arrow keys in a desktop browser. */
 window.onAndroidKey = (k) => {
   lastTouch = lastUserTouch = Date.now();
