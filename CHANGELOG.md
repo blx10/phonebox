@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0 — 2026-11-10
+
+- Add optional global, page and widget appearance settings with Original, Rounded cards, Flat, Content only and
+  Seamless panel presets. Configure corners, grid spacing, widget/page padding, borders and shadows independently.
+- Preview unsaved appearance changes in the real panel from General settings; page/widget inspectors support
+  overrides and resetting inheritance. Smart Stack children inherit their stack appearance.
+- Preserve the original look for existing layouts, keep explicit zero/false values, bound imported settings and
+  retain device safe areas. Page sharing and duplication preserve appearance.
+
+
 ## 0.8.0 — 2026-11-10
 
 - Add 58 Control Deck widget types and six templates, bringing the catalog to 113 widgets and 30 templates.

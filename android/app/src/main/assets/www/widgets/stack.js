@@ -79,6 +79,7 @@ W.stack = {
       itemEl.setAttribute('aria-hidden', String(i !== 0));
       itemEl.inert = i !== 0;
       const subBox = h('div', `w w-${item.type}${def?.bare ? ' bare' : ' card'}`);
+      PhoneBoxAppearance.widget(subBox, ctx.appearance);
       itemEl.appendChild(subBox);
       wrap.appendChild(itemEl);
 

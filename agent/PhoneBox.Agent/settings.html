@@ -379,6 +379,7 @@ dd { margin: 0; word-break: break-all; }
 
     <section id="general">
       <h2>General</h2>
+      <div class="card" id="appearanceSettings"></div>
       <div class="card" id="controlSettings"></div>
       <p class="lead">Weather, night mode, display behaviour and the phone connection.</p>
 
@@ -623,6 +624,7 @@ dd { margin: 0; word-break: break-all; }
 <div class="toast" id="toast"></div>
 <div class="modal" id="modal" hidden><div class="modal-box"><div id="modalBody"></div><div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn" id="modalClose">Cancel</button></div></div></div>
 
+<script src="../panel/appearance.js"></script>
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
@@ -870,6 +872,7 @@ function renderPageEditor() {
           if (!confirm(`Delete the page "${p.title}"?`)) return;
           cfg.pages.splice(selPage, 1); selWidget = -1; renderPages(); changed();
         } }, 'Delete page'))));
+  $('peHead').append(appearanceEditor(p, () => [cfg.display?.appearance], 'Page appearance'));
   $('peRest').replaceChildren(
     h('p', { class: 'hint layout-hint', style: { margin: '6px 0 14px' } }, 'Drag a widget to move it, drag its corner to resize. Widgets cannot overlap. Click one to edit its options.'),
     h('div', { class: 'ed-cols' },
@@ -911,13 +914,20 @@ function setStage(mode) {
 }
 
 function sendPreview() {
-  if (!cfg || !previewFrame || !previewReady || stageMode !== 'live') return;
-  previewFrame.contentWindow.postMessage({ type: 'phonebox-preview', config: JSON.parse(JSON.stringify(cfg)), page: selPage }, location.origin);
+  if (!cfg) return;
+  const config = JSON.parse(JSON.stringify(cfg));
+  if (previewFrame && previewReady && stageMode === 'live')
+    previewFrame.contentWindow.postMessage({ type: 'phonebox-preview', config, page: selPage }, location.origin);
+  if (appearancePreviewFrame && appearancePreviewReady)
+    appearancePreviewFrame.contentWindow.postMessage({ type: 'phonebox-preview', config, page: Number($('appearancePreviewPage')?.value || 0) }, location.origin);
 }
 function queuePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(sendPreview, 120); }
 
 window.addEventListener('message', (e) => {
-  if (e.origin === location.origin && e.data?.type === 'phonebox-preview-ready') { previewReady = true; sendPreview(); }
+  if (e.origin !== location.origin || e.data?.type !== 'phonebox-preview-ready') return;
+  if (e.source === previewFrame?.contentWindow) previewReady = true;
+  if (e.source === appearancePreviewFrame?.contentWindow) appearancePreviewReady = true;
+  sendPreview();
 });
 for (const b of $('stageSeg').children) b.onclick = () => setStage(b.dataset.v);
 setStage(stageMode);
@@ -1062,6 +1072,7 @@ function renderInspector() {
         h('button', { class: 'btn sm danger', onclick: () => { p.widgets.splice(selWidget, 1); selWidget = -1; renderCanvas(); renderInspector(); changed(); } }, 'Remove'))),
     h('p', { class: 'hint', style: { margin: '0 0 12px' } }, d.desc),
     ...d.options.map((o) => optionField(w, o)),
+    appearanceEditor(w, () => [cfg.display?.appearance, p.appearance], 'Widget appearance', true),
     h('div', { class: 'row', style: { gap: '8px' } }, num('x', 'Column', 0, catalog.cols - 1), num('y', 'Row', 0, catalog.rows - 1),
       num('w', 'Width', d.minW, catalog.cols), num('h', 'Height', d.minH, catalog.rows)));
 }
@@ -1914,7 +1925,82 @@ function renderControlSettings() {
   }),hardware);
 }
 
+let appearancePreviewFrame = null, appearancePreviewReady = false, appearancePreviewObserver = null;
+
+function appearanceEditor(owner, parents, label, widget = false) {
+  const root = h('details', { 'aria-label': label, class: 'appearance-editor', style: { marginTop: '12px' } });
+  const effective = () => PhoneBoxAppearance.resolve(...parents(), owner.appearance);
+  const update = () => { changed(); renderCanvas(); };
+  const set = (key, value) => {
+    const appearance = { ...(owner.appearance || {}) };
+    if (value == null) delete appearance[key]; else appearance[key] = value;
+    if (Object.keys(appearance).length) owner.appearance = appearance; else delete owner.appearance;
+    update();
+  };
+  const render = () => {
+    const current = effective();
+    const style = h('select', { 'aria-label': 'Surface style', onchange: e => {
+      if (e.target.value) owner.appearance = { style: e.target.value }; else delete owner.appearance;
+      update(); render();
+    } }, ...[['', 'Inherit / current look'], ['default', 'Original appearance'], ['cards', 'Rounded cards'], ['flat', 'Flat surfaces'], ['borderless', 'Content only'], ['seamless', 'Seamless panel']]
+      .map(([value, text]) => h('option', { value, selected: (owner.appearance?.style || '') === value }, text)));
+    const fields = [h('div', { class: 'field' }, h('label', {}, 'Surface style'), style)];
+    const numeric = (key, title, max, fallback) => {
+      const value = current[key];
+      const output = h('output', { style: { minWidth: '80px', fontVariantNumeric: 'tabular-nums' } }, value == null ? 'Automatic' : value + ' px');
+      const input = h('input', { type: 'range', min: 0, max, step: 1, value: value ?? fallback, 'aria-label': title, style: { flex: '1', minWidth: '60px' } });
+      input.oninput = () => { set(key, Number(input.value)); output.textContent = input.value + ' px'; };
+      const reset = h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Inherit ' + title.toLowerCase(), onclick: () => { set(key, null); render(); } }, 'Inherit');
+      fields.push(h('div', { class: 'field' }, h('label', {}, title), h('div', { class: 'row', style: { gap: '10px' } }, input, output, reset)));
+    };
+    numeric('radius', 'Corner radius', 32, 16);
+    if (!widget) numeric('gap', 'Widget spacing', 24, 8);
+    numeric('padding', 'Widget inner padding', 24, 12);
+    if (!widget) numeric('pagePadding', 'Page edge padding', 32, 14);
+    for (const [key, title] of [['border', 'Widget border'], ['shadow', 'Widget shadow']]) {
+      const value = owner.appearance?.[key];
+      const inherited = { ...(owner.appearance || {}) }; delete inherited[key];
+      const fallback = PhoneBoxAppearance.resolve(...parents(), inherited)[key];
+      fields.push(h('div', { class: 'field' }, h('label', {}, title),
+        h('select', { 'aria-label': title, onchange: e => set(key, e.target.value === '' ? null : e.target.value === 'true') },
+          h('option', { value: '', selected: value == null }, fallback == null ? 'Original widget default' : 'Inherit (' + (fallback ? 'on' : 'off') + ')'),
+          h('option', { value: 'true', selected: value === true }, 'On'), h('option', { value: 'false', selected: value === false }, 'Off'))));
+    }
+    root.replaceChildren(h('summary', {}, label), h('p', { class: 'hint' }, widget
+      ? 'Overrides the page and global appearance. Inherit restores the preset or parent value.'
+      : 'Choose a preset, then adjust individual values. Safe areas and page navigation remain reserved.'), ...fields,
+      h('button', { type: 'button', class: 'btn sm', onclick: () => { delete owner.appearance; update(); render(); } }, 'Reset to inherited appearance'));
+  };
+  render(); return root;
+}
+
+function renderAppearanceSettings() {
+  const root = $('appearanceSettings');
+  appearancePreviewObserver?.disconnect();
+  appearancePreviewFrame = null; appearancePreviewReady = false;
+  const editor = appearanceEditor(cfg.display, () => [], 'Global appearance');
+  editor.open = true;
+  const preview = h('div', { class: 'preview', hidden: true });
+  const selector = h('select', { id: 'appearancePreviewPage', 'aria-label': 'Appearance preview page', onchange: queuePreview },
+    ...(cfg.pages || []).map((p, index) => p.enabled !== false ? h('option', { value: index }, p.title) : null));
+  const toggle = h('button', { type: 'button', class: 'btn', onclick: () => {
+    preview.hidden = !preview.hidden;
+    toggle.textContent = preview.hidden ? 'Show live appearance preview' : 'Hide live appearance preview';
+    if (!appearancePreviewFrame && !preview.hidden) {
+      appearancePreviewFrame = h('iframe', { src: '../panel/?preview=1', title: 'Live appearance preview' });
+      preview.append(appearancePreviewFrame);
+      const frame = appearancePreviewFrame;
+      appearancePreviewObserver = new ResizeObserver(() => { frame.style.transform = 'scale(' + preview.clientWidth / 780 + ')'; });
+      appearancePreviewObserver.observe(preview);
+    }
+    queuePreview();
+  } }, 'Show live appearance preview');
+  root.replaceChildren(h('h3', {}, 'Appearance'), h('p', { class: 'hint' }, 'Global defaults → page overrides → widget overrides. Preview your unsaved changes, then Save to apply them to the phone.'),
+    editor, h('div', { class: 'row', style: { gap: '10px', marginBottom: '12px' } }, selector, toggle), preview);
+}
+
 function bindForm() {
+  renderAppearanceSettings();
   renderControlSettings();
   document.querySelectorAll('[data-bind]').forEach((el) => {
     const p = el.dataset.bind, type = el.dataset.type;

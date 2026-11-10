@@ -129,6 +129,13 @@ Optional extras that light up more widgets: an NVIDIA GPU (`nvidia-smi`), the [G
 (`gh auth login`), Claude Code, Codex, and [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
 with its web server on port 8085 for the CPU temperature.
 
+## Appearance
+
+Set corner radius, widget spacing, inner padding, page padding, borders and shadows in **Settings → General →
+Appearance**. Choose Original, Rounded cards, Flat, Content only or Seamless panel, then customize individual values.
+Pages and individual widgets can override global defaults. Live preview shows unsaved changes before Save.
+Existing layouts keep their original appearance. See the [appearance guide](docs/APPEARANCE.md).
+
 ## Control Deck
 
 Turn a phone into a touch control deck with application audio faders, microphone controls, device selection,

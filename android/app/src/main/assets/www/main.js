@@ -2,6 +2,7 @@
 // they import what they need from here, so this module must not run code that needs them while it loads
 // (the start section at the end runs after every module has loaded).
 import { W } from './registry.js';
+import './appearance.js';
 import { cached } from './widgets/helpers.js';
 import './widgets/basic.js';
 import './widgets/stack.js';
@@ -742,7 +743,7 @@ export function buildLayout() {
   const enabled = (cfg.pages || []).filter((p) => p.enabled !== false && Array.isArray(p.widgets));
   const next = enabled.length ? enabled : FALLBACK_PAGES;
   const portrait = isPortrait();
-  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, portrait]);
+  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, cfg.display?.appearance, portrait]);
   if (key === layoutKey) return;
   layoutKey = key;
   const prevId = pages[curPage]?.id;
@@ -753,21 +754,25 @@ export function buildLayout() {
   pager.replaceChildren();
   pages.forEach((p, pi) => {
     const grid = h('div', 'grid');
+    const pageAppearance = PhoneBoxAppearance.resolve(cfg.display?.appearance, p.appearance);
     const pl = portrait ? portraitLayout(p.widgets) : null;
     if (pl) { grid.style.gridTemplateColumns = 'repeat(6, minmax(0, 1fr))'; grid.style.gridTemplateRows = `repeat(${pl.rows}, minmax(0, 1fr))`; }
     for (const w of p.widgets) {
       const def = W[w.type];
       if (!def) continue;
       const box = h('div', `w w-${w.type}${def.bare ? ' bare' : ' card'}`);
+      const appearance = PhoneBoxAppearance.resolve(cfg.display?.appearance, p.appearance, w.appearance);
       const at = pl?.pos.get(w) || w;
       box.style.gridArea = `${at.y + 1} / ${at.x + 1} / span ${at.h} / span ${at.w}`;
       grid.appendChild(box);
-      const ctx = { page: p, w, o: w.options || {}, box };
+      const ctx = { page: p, w, o: w.options || {}, box, appearance };
       let inst;
       try { inst = def.create(box, ctx) || {}; } catch (e) { box.replaceChildren(h('div', 'empty', `${w.type}: ${e.message}`)); inst = {}; }
+      PhoneBoxAppearance.widget(box, appearance);
       mounted.push({ pi, def: inst.needs ? { ...def, needs: inst.needs } : def, inst, ctx, dirty: true });
     }
     const sec = h('section', 'page', grid);
+    PhoneBoxAppearance.page(sec, grid, pageAppearance);
     sec.dataset.id = p.id;
     pager.appendChild(sec);
   });

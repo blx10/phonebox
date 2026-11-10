@@ -48,10 +48,10 @@ public sealed class AgentConfig
         display = Display,
         pages = PagesFor(deviceId).Select(p => new
         {
-            p.Id, p.Title, p.Icon, p.Enabled, p.IdleSec,
+            p.Id, p.Title, p.Icon, p.Enabled, p.IdleSec, p.Appearance,
             widgets = (p.Widgets ?? []).Select(w => new
             {
-                w.Id, w.Type, w.X, w.Y, w.W, w.H,
+                w.Id, w.Type, w.X, w.Y, w.W, w.H, w.Appearance,
                 // command widgets: only what the panel shows; the scripts (command, commandUnix, …) stay on this computer
                 options = StackWidgets.PublicOptions(w),
             }),
@@ -88,6 +88,7 @@ public sealed class NightConfig
 
 public sealed class DisplayConfig
 {
+    public AppearanceConfig? Appearance { get; set; }
     public bool ShowSeconds { get; set; } = true;
     /// <summary>Return to the first page after this many idle seconds; 0 = never.</summary>
     public int IdleReturnSec { get; set; } = 90;
@@ -160,6 +161,7 @@ public sealed class ClaudeConfig
 
 public sealed class PageConfig
 {
+    public AppearanceConfig? Appearance { get; set; }
     public string Id { get; set; } = "";
     public string Title { get; set; } = "";
     public string Icon { get; set; } = "";
@@ -179,6 +181,7 @@ public sealed class PageConfig
 
 public sealed class WidgetConfig
 {
+    public AppearanceConfig? Appearance { get; set; }
     public string Id { get; set; } = "";
     public string Type { get; set; } = "";
     public int X { get; set; }
@@ -192,7 +195,7 @@ public sealed class WidgetConfig
     public int? Int(string key) => Opt(key) is { ValueKind: JsonValueKind.Number } v && v.TryGetDouble(out var d) ? (int)d : null;
     public bool? Bool(string key) => Opt(key) is { } v ? v.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null } : null;
     public void Set(string key, object? value) => (Options ??= [])[key] = JsonSerializer.SerializeToElement(value);
-    public WidgetConfig Clone() => new() { Id = Id, Type = Type, X = X, Y = Y, W = W, H = H, Options = Options?.ToDictionary(kv => kv.Key, kv => kv.Value.Clone()) };
+    public WidgetConfig Clone() => new() { Id = Id, Type = Type, X = X, Y = Y, W = W, H = H, Appearance = Appearance?.Clone(), Options = Options?.ToDictionary(kv => kv.Key, kv => kv.Value.Clone()) };
 }
 
 /// <summary>
@@ -408,6 +411,7 @@ public sealed partial class ConfigStore(string path)
         c.Controls.Profiles = c.Controls.Profiles.Where(p => p is not null && !string.IsNullOrWhiteSpace(p.Id)).DistinctBy(p => p.Id).Take(128).ToList();
         foreach (var profile in c.Controls.Profiles) { profile.Levels = (profile.Levels ?? []).Where(l => l is not null).Take(512).ToList(); profile.Defaults ??= []; profile.Actions = (profile.Actions ?? []).Where(a => !string.IsNullOrEmpty(a)).Take(64).ToList(); profile.Label ??= profile.Id; }
         c.Display ??= new();
+        c.Display.Appearance?.Normalize();
         c.Display.IdleReturnSec = Math.Clamp(c.Display.IdleReturnSec, 0, 3600);
         c.Display.SwitchCountdownSec = Math.Clamp(c.Display.SwitchCountdownSec, 0, 30);
         c.Display.TouchGraceSec = Math.Clamp(c.Display.TouchGraceSec, 0, 600);
@@ -492,6 +496,7 @@ public sealed partial class ConfigStore(string path)
         foreach (var p in src)
         {
             if (p is null) continue;
+            p.Appearance?.Normalize();
             var tpl = Catalog.Template(p.Template ?? p.Type);
             if ((p.Widgets is null || p.Widgets.Count == 0) && tpl is not null)
             {
@@ -516,6 +521,7 @@ public sealed partial class ConfigStore(string path)
             foreach (var w in p.Widgets ?? [])
             {
                 if (w is null || !Catalog.IsWidget(w.Type)) continue;
+                w.Appearance?.Normalize(widget: true);
                 var (minW, minH) = Catalog.MinSize(w.Type);
                 w.W = Math.Clamp(w.W, Math.Min(minW, Catalog.Cols), Catalog.Cols);
                 w.H = Math.Clamp(w.H, Math.Min(minH, Catalog.Rows), Catalog.Rows);

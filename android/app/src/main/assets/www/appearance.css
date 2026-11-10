@@ -1,0 +1,24 @@
+/* Opt-in overrides only: old layouts retain their exact widget-specific styling. */
+.w.has-widget-radius { border-radius: var(--widget-radius) !important; }
+.w.has-widget-padding { padding: var(--widget-padding) !important; }
+.w[data-widget-border="false"] { border: 0 !important; }
+.w[data-widget-border="true"] { border: 1px solid var(--line) !important; }
+.w[data-widget-shadow="false"] { box-shadow: none !important; }
+.w[data-widget-shadow="true"] { box-shadow: 0 5px 16px rgba(0,0,0,.28) !important; }
+.w:is([data-widget-surface="cards"],[data-widget-surface="seamless"]) { background: var(--card); }
+.w[data-widget-surface="flat"] {
+  background: #15191f;
+  background: color-mix(in srgb, var(--bg) 94%, var(--text));
+  background-image: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+.w[data-widget-surface="borderless"] { background: transparent !important; background-image: none !important; }
+/* Keep control surfaces consistent without changing signal meters or round dials. */
+.w.has-widget-radius :is(.deck-channel,.deck-button,.deck-hold,.chip-btn,.sc) {
+  border-radius: min(var(--widget-radius), 12px);
+}
+.w[data-widget-surface="flat"] :is(.deck-channel,.deck-button,.deck-hold,.sc) {
+  background-image: none;
+  box-shadow: none;
+}
