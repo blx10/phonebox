@@ -141,6 +141,112 @@ export function toast(msg, kind = '', title = '', seconds = 2.6) {
   toastTimer = setTimeout(() => (t.className = 'toast ' + kind), Math.max(1, seconds) * 1000);
 }
 
+export function showRotationFeedback(containerEl, paused) {
+  let overlay = containerEl.querySelector(':scope > .rot-overlay');
+  if (!overlay) {
+    overlay = h('div', 'rot-overlay');
+    containerEl.appendChild(overlay);
+  }
+  if (overlay._hideTimer) {
+    clearTimeout(overlay._hideTimer);
+    overlay._hideTimer = null;
+  }
+  const svg = paused
+    ? `<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>`
+    : `<svg viewBox="0 0 24 24"><path d="M8 5.14v13.72a1 1 0 0 0 1.52.85l11.08-6.86a1 1 0 0 0 0-1.7L9.52 4.29A1 1 0 0 0 8 5.14z"/></svg>`;
+  overlay.innerHTML = `<div class="rot-overlay-icon">${svg}</div>`;
+  overlay.classList.remove('show');
+  void overlay.offsetWidth;
+  overlay.classList.add('show');
+  overlay._hideTimer = setTimeout(() => {
+    overlay.classList.remove('show');
+    overlay._hideTimer = null;
+  }, 2000);
+}
+
+export function attachRotationHold(el, onToggle) {
+  let timer = null;
+  let startX = 0, startY = 0;
+  let held = false;
+
+  const start = (e, x, y) => {
+    if (e._rotHold) return;
+    e._rotHold = true;
+    held = false;
+    startX = x;
+    startY = y;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      held = true;
+      el._held = true;
+      const stack = el.closest?.('.w-stack');
+      if (stack) stack._held = true;
+      timer = null;
+      try { haptic(); } catch (_) {}
+      onToggle();
+    }, 500);
+  };
+
+  const move = (x, y) => {
+    if (!timer) return;
+    if (Math.hypot(x - startX, y - startY) > 18) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  const cancel = () => {
+    clearTimeout(timer);
+    timer = null;
+    if (held) {
+      setTimeout(() => {
+        held = false;
+        el._held = false;
+        const stack = el.closest?.('.w-stack');
+        if (stack) stack._held = false;
+      }, 250);
+    }
+  };
+
+  el.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) {
+      start(e, e.touches[0].clientX, e.touches[0].clientY);
+    } else {
+      cancel();
+    }
+  }, { passive: true });
+
+  el.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 1) {
+      move(e.touches[0].clientX, e.touches[0].clientY);
+    } else {
+      cancel();
+    }
+  }, { passive: true });
+
+  el.addEventListener('touchend', cancel, { passive: true });
+  el.addEventListener('touchcancel', cancel, { passive: true });
+
+  el.addEventListener('mousedown', (e) => {
+    if (e.button === 0) start(e, e.clientX, e.clientY);
+  });
+  el.addEventListener('mousemove', (e) => {
+    move(e.clientX, e.clientY);
+  });
+  el.addEventListener('mouseup', cancel);
+  el.addEventListener('mouseleave', cancel);
+
+  el.addEventListener('click', (e) => {
+    if (held || el._held) {
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      held = false;
+      el._held = false;
+    }
+  }, true);
+}
+
 // ---------------------------------------------------------------- charts
 export function sizeCanvas(c) {
   const dpr = window.devicePixelRatio || 1;

@@ -1,4 +1,4 @@
-import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtDur, fmtMem, fmtReset, fmtTime, fmtValue, h, haptic, hist, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, ringSvg, setArtColor, setVolDragging, shortDur, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
+import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, attachRotationHold, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtDur, fmtMem, fmtReset, fmtTime, fmtValue, h, haptic, hist, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, ringSvg, setArtColor, setVolDragging, shortDur, showRotationFeedback, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
 import { W } from '../registry.js';
 
 // ================================================================= widgets
@@ -299,6 +299,30 @@ W.quotas = {
     let last = 0;
     let offset = 0;
     let lastRotate = Date.now();
+    let paused = false;
+
+    attachRotationHold(box, () => {
+      const stackBox = box.closest('.w-stack');
+      const ps = getPageSize();
+      const want = getProviders();
+      const list = quotaProviders().filter((p) => want.includes(p.id));
+      const hasQuotaRotation = isRotateEnabled() && ps > 0 && list.length > ps;
+
+      if (stackBox && typeof stackBox._toggleStackPause === 'function' && stackBox._hasMultipleWidgets?.()) {
+        const nextState = stackBox._toggleStackPause();
+        if (hasQuotaRotation) {
+          paused = nextState;
+          lastRotate = Date.now();
+        }
+        return;
+      }
+
+      if (!hasQuotaRotation) return;
+      paused = !paused;
+      lastRotate = Date.now();
+      showRotationFeedback(box, paused);
+      haptic();
+    });
 
     const isRotateEnabled = () => {
       if (o.rotate !== undefined && o.rotate !== null) return !!o.rotate;
@@ -421,15 +445,27 @@ W.quotas = {
     return {
       update(kind) {
         if (kind === 'tick') {
-          const sec = getRotateInterval();
-          if (sec > 0 && Date.now() - lastRotate >= sec * 1000) {
-            const ps = getPageSize();
-            const want = getProviders();
-            const list = quotaProviders().filter((p) => want.includes(p.id));
-            if (ps > 0 && list.length > ps) {
-              offset = (offset + 1) % list.length;
-              lastRotate = Date.now();
-              render();
+          const stackItem = box.closest('.stack-item');
+          if (stackItem && !stackItem.classList.contains('active')) {
+            lastRotate = Date.now();
+            return;
+          }
+          const stackBox = box.closest('.w-stack');
+          if (stackBox?._isStackPaused?.()) {
+            lastRotate = Date.now();
+            return;
+          }
+          if (!paused) {
+            const sec = getRotateInterval();
+            if (sec > 0 && Date.now() - lastRotate >= sec * 1000) {
+              const ps = getPageSize();
+              const want = getProviders();
+              const list = quotaProviders().filter((p) => want.includes(p.id));
+              if (ps > 0 && list.length > ps) {
+                offset = (offset + 1) % list.length;
+                lastRotate = Date.now();
+                render();
+              }
             }
           }
           if (Date.now() - last > 30_000) { last = Date.now(); render(); }

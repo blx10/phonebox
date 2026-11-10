@@ -1,4 +1,4 @@
-import { h, haptic } from '../main.js';
+import { attachRotationHold, h, haptic, showRotationFeedback } from '../main.js';
 import { W } from '../registry.js';
 
 function parseWidgets(raw) {
@@ -176,6 +176,7 @@ W.stack = {
     }, { passive: true });
 
     wrap.addEventListener('touchend', (e) => {
+      if (box._held) return;
       if (!swiping || !e.changedTouches || e.changedTouches.length !== 1) return;
       swiping = false;
       const dx = e.changedTouches[0].clientX - startX;
@@ -198,21 +199,42 @@ W.stack = {
     if (!Number.isFinite(intervalSec) || intervalSec < 3) intervalSec = 10;
     if (intervalSec > 120) intervalSec = 120;
 
+    let paused = false;
+
     function resetTimer() {
       lastRotate = Date.now();
     }
+
+    box._isStackPaused = () => paused;
+    box._hasMultipleWidgets = () => children.length > 1;
+    box._toggleStackPause = (forceState) => {
+      if (children.length <= 1) return paused;
+      paused = (typeof forceState === 'boolean') ? forceState : !paused;
+      resetTimer();
+      showRotationFeedback(box, paused);
+      haptic();
+      return paused;
+    };
+
+    attachRotationHold(box, () => {
+      box._toggleStackPause();
+    });
 
     return {
       needs: Array.from(collectedNeeds),
       update(kind) {
         if (destroyed) return;
         if (kind === 'tick') {
-          const r = box.getBoundingClientRect();
-          const visible = r.right > 0 && r.left < innerWidth && r.bottom > 0 && r.top < innerHeight && !document.hidden;
-          if (!visible) lastRotate = Date.now();
-          else if (Date.now() - lastRotate >= intervalSec * 1000 && !box.contains(document.activeElement)) {
-            goTo(currentIndex + 1, 'next');
+          if (paused) {
             lastRotate = Date.now();
+          } else {
+            const r = box.getBoundingClientRect();
+            const visible = r.right > 0 && r.left < innerWidth && r.bottom > 0 && r.top < innerHeight && !document.hidden;
+            if (!visible) lastRotate = Date.now();
+            else if (Date.now() - lastRotate >= intervalSec * 1000 && !box.contains(document.activeElement)) {
+              goTo(currentIndex + 1, 'next');
+              lastRotate = Date.now();
+            }
           }
         }
         for (const child of children) {
