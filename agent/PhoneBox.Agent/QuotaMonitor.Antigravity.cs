@@ -30,24 +30,33 @@ public sealed partial class QuotaMonitor
             try { provider = await ReadAntigravityCliAsync(cli, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) when (ex is IOException or TimeoutException or JsonException or System.ComponentModel.Win32Exception)
-            { log.LogDebug("Antigravity CLI quota refresh failed ({Kind})", ex.GetType().Name); }
+            { _log.LogDebug("Antigravity CLI quota refresh failed ({Kind})", ex.GetType().Name); }
         }
         if (endpoints.Length == 0 && cli is null)
         {
             _antigravity = _antigravity is { Limits.Count: > 0 } prev
                 ? prev with { Error = "Antigravity process not running" }
                 : null;
+            if (_providers.TryGetValue("antigravity", out var prevProv) && prevProv.Limits.Count > 0)
+                _providers["antigravity"] = prevProv with { Error = "Antigravity process not running" };
             return false;
         }
 
         if (provider is not null)
         {
             _antigravity = provider;
+            var prevCost = _providers.TryGetValue("antigravity", out var prevProv) ? prevProv.Cost : null;
+            _providers["antigravity"] = provider with { Cost = prevCost, Source = "native" };
+            _overview = BuildOverview(Snapshot());
             return true;
         }
         const string error = "Could not read local Antigravity quotas";
         _antigravity = _antigravity is { Limits.Count: > 0 } cached
             ? cached with { Error = error } : Fail("antigravity", "Antigravity", error);
+        if (_providers.TryGetValue("antigravity", out var cachedProv) && cachedProv.Limits.Count > 0)
+            _providers["antigravity"] = cachedProv with { Error = error };
+        else
+            _providers["antigravity"] = Fail("antigravity", "Antigravity", error);
         return false;
     }
 

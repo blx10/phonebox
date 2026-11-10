@@ -18,6 +18,7 @@ public sealed class AgentConfig
     public UpdateConfig Updates { get; set; } = new();
     public ClaudeConfig Claude { get; set; } = new();
     public List<PageConfig> Pages { get; set; } = [];
+
     public List<Shortcut> Shortcuts { get; set; } = [];
     public List<RuleConfig> Rules { get; set; } = [];
     public ChargeConfig Charge { get; set; } = new();
@@ -157,6 +158,16 @@ public sealed class ClaudeConfig
     public int TimeoutSec { get; set; } = 90;
     /// <summary>Only use the phone when the PC has been idle for a minute (you are away from the keyboard).</summary>
     public bool OnlyWhenAway { get; set; }
+}
+
+public sealed class CodexBarConfig
+{
+    public List<string> Providers { get; set; } = ["claude", "codex", "antigravity"];
+    public bool Rotate { get; set; } = true;
+    public int PageSize { get; set; } = 2;
+    public int RotateInterval { get; set; } = 8;
+    public bool ShowOverview { get; set; } = true;
+    public bool Customized { get; set; }
 }
 
 public sealed class PageConfig
@@ -401,7 +412,6 @@ public sealed partial class ConfigStore(string path)
     {
         c.Weather ??= new();
         c.CodexBar ??= new();
-        c.CodexBar.Providers = (c.CodexBar.Providers ?? []).Where(p => p is "claude" or "codex" or "antigravity").Distinct().ToArray();
         c.CodexBar.PageSize = Math.Clamp(c.CodexBar.PageSize, 0, 6);
         c.CodexBar.RotateInterval = Math.Clamp(c.CodexBar.RotateInterval, 2, 300);
         c.Night ??= new();
@@ -430,7 +440,22 @@ public sealed partial class ConfigStore(string path)
         if (string.IsNullOrWhiteSpace(c.Lan.WebhookToken)) c.Lan.WebhookToken = NewToken();
         c.Night.Brightness = Math.Clamp(c.Night.Brightness, 0.01, 1);
 
-        c.Pages = NormalizePages(c.Pages);
+        c.CodexBar ??= new();
+        c.CodexBar.Providers ??= ["claude", "codex", "antigravity"];
+        var localCb = QuotaMonitor.ReadLocalCodexBarProviders(onlyEnabled: true).Select(p => p.Id).ToList();
+        bool IsDefaultSet(IEnumerable<string> list)
+        {
+            var arr = list.ToList();
+            return arr.Count is > 0 and <= 3 && arr.All(x => x is "claude" or "codex" or "antigravity");
+        }
+        if (!c.CodexBar.Customized && localCb.Count > 0 && IsDefaultSet(c.CodexBar.Providers))
+        {
+            foreach (var id in localCb)
+                if (!c.CodexBar.Providers.Contains(id, StringComparer.OrdinalIgnoreCase))
+                    c.CodexBar.Providers.Add(id);
+        }
+
+        c.Pages = NormalizePages(c.Pages, !c.CodexBar.Customized ? localCb : null);
 
         var used = new HashSet<string>();
         foreach (var s in c.Shortcuts ??= [])
@@ -491,7 +516,7 @@ public sealed partial class ConfigStore(string path)
     }
 
     /// <summary>Expands templates, migrates the old fixed pages, keeps widgets on the grid and makes ids unique.</summary>
-    private static List<PageConfig> NormalizePages(List<PageConfig>? input)
+    private static List<PageConfig> NormalizePages(List<PageConfig>? input, IReadOnlyList<string>? extraProviders = null)
     {
         var src = input is { Count: > 0 } ? input : DefaultPages.Select(t => new PageConfig { Template = t }).ToList();
         var pages = new List<PageConfig>();
@@ -536,6 +561,53 @@ public sealed partial class ConfigStore(string path)
                 var wu = wid;
                 for (var i = 2; !widgetIds.Add(wu); i++) wu = $"{wid}-{i}";
                 w.Id = wu;
+                if (extraProviders is { Count: > 0 })
+                {
+                    if (w.Type is "codexbar" or "quotas" && w.Opt("providers") is { ValueKind: JsonValueKind.Array } provEl)
+                    {
+                        var cur = provEl.EnumerateArray().Select(x => x.GetString()).OfType<string>().ToList();
+                        if (cur.Count is > 0 and <= 3 && cur.All(x => x is "claude" or "codex" or "antigravity"))
+                        {
+                            foreach (var ep in extraProviders)
+                                if (!cur.Contains(ep, StringComparer.OrdinalIgnoreCase))
+                                    cur.Add(ep);
+                            w.Set("providers", cur.ToArray());
+                        }
+                    }
+                    else if (w.Type == "stack" && w.Opt("widgets") is { ValueKind: JsonValueKind.Array } stackEl)
+                    {
+                        var changedStack = false;
+                        var updatedStack = new List<object?>();
+                        foreach (var sub in stackEl.EnumerateArray())
+                        {
+                            if (sub.ValueKind == JsonValueKind.Object
+                                && sub.TryGetProperty("type", out var stEl) && stEl.GetString() is "codexbar" or "quotas"
+                                && sub.TryGetProperty("options", out var soEl) && soEl.ValueKind == JsonValueKind.Object)
+                            {
+                                var optsDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(soEl.GetRawText(), ReadOpts) ?? [];
+                                if (optsDict.TryGetValue("providers", out var spEl) && spEl.ValueKind == JsonValueKind.Array)
+                                {
+                                    var cur = spEl.EnumerateArray().Select(x => x.GetString()).OfType<string>().ToList();
+                                    if (cur.Count is > 0 and <= 3 && cur.All(x => x is "claude" or "codex" or "antigravity"))
+                                    {
+                                        foreach (var ep in extraProviders)
+                                            if (!cur.Contains(ep, StringComparer.OrdinalIgnoreCase))
+                                                cur.Add(ep);
+                                        optsDict["providers"] = JsonSerializer.SerializeToElement(cur.ToArray());
+                                        changedStack = true;
+                                    }
+                                }
+                                var enabled = !sub.TryGetProperty("enabled", out var enEl) || enEl.ValueKind != JsonValueKind.False;
+                                updatedStack.Add(new { type = stEl.GetString(), enabled, options = optsDict });
+                            }
+                            else
+                            {
+                                updatedStack.Add(sub.Clone());
+                            }
+                        }
+                        if (changedStack) w.Set("widgets", updatedStack);
+                    }
+                }
                 widgets.Add(w);
             }
             p.Widgets = widgets;
@@ -572,7 +644,14 @@ public sealed partial class ConfigStore(string path)
                 }
                 break;
             case "ai":
-                Find("quotas")?.Set("providers", new[] { "claude", "codex" }.Where(x => On(x)).ToArray());
+            case "codexbar":
+                if ((Find("quotas") ?? Find("codexbar")) is { } qw)
+                {
+                    qw.Set("providers", new[] { "claude", "codex", "antigravity" }.Where(x => On(x)).ToArray());
+                    qw.Set("rotate", p.Options?.TryGetValue("rotate", out var rot) == true ? rot.GetBoolean() : true);
+                    qw.Set("pageSize", p.Options?.TryGetValue("pageSize", out var ps) == true ? ps.GetInt32() : 2);
+                    qw.Set("rotateInterval", p.Options?.TryGetValue("rotateInterval", out var ri) == true ? ri.GetInt32() : 8);
+                }
                 break;
             case "work":
                 if (!On("sessions")) { ws.RemoveAll(w => w.Type == "sessions"); if (Find("github") is { } g) { g.X = 0; g.W = 12; } }
@@ -616,10 +695,4 @@ public sealed partial class ConfigStore(string path)
     private static partial Regex HhMm();
 }
 
-public sealed class CodexBarConfig
-{
-    public string[] Providers { get; set; } = ["claude", "codex", "antigravity"];
-    public bool Rotate { get; set; } = true;
-    public int PageSize { get; set; } = 2;
-    public int RotateInterval { get; set; } = 8;
-}
+

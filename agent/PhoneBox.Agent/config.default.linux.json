@@ -17,6 +17,9 @@
   // switch pages with the phone's volume keys
   "display": { "showSeconds": true, "idleReturnSec": 90, "vibrate": true, "volumeKeys": true },
 
+  // CodexBar and AI quotas: tracked providers, visible cards at a time, rotation interval (seconds)
+  "codexBar": { "providers": ["claude", "codex", "antigravity"], "pageSize": 2, "rotateInterval": 8 },
+
   // Pages in the order they appear on the phone. Each page is a 12 x 6 grid of widgets; the settings page has a
   // visual editor. { "template": "<id>" } creates a page from templates.json (home, ai, work, system, procs, deck,
   // music, clock, focus, world, dashboard, devops, feeds, ambient, markets, daily, status, calm) and is replaced by
@@ -24,6 +27,7 @@
   "pages": [
     { "template": "home" },
     { "template": "ai" },
+    { "template": "codexbar" },
     { "template": "work" },
     { "template": "system" },
     { "template": "procs" },

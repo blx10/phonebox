@@ -413,7 +413,25 @@ export const MEDIA_HTML = `
     <span>Is the PhoneBox agent running? Plug in the USB cable, or turn on Wi-Fi in the PhoneBox settings and pair once over USB.</span></div>`;
 
 // ---------------------------------------------------------------- quotas
-export const Q_STYLE = { antigravity: { color: '#38bdf8', logo: '✦' }, claude: { color: '#d97757', logo: '✳' }, codex: { color: '#e5e7eb', logo: '◎' } };
+export const Q_STYLE = {
+  antigravity: { color: '#2dd4bf', barColor: '#2dd4bf', logo: '✦' },
+  claude: { color: '#e07a5f', barColor: '#e07a5f', logo: '✳' },
+  codex: { color: '#818cf8', barColor: '#38bdf8', logo: '◎' },
+  alibabatokenplan: { color: '#f97316', barColor: '#f97316', logo: '🟠' },
+  'alibaba-token-plan': { color: '#f97316', barColor: '#f97316', logo: '🟠' },
+  alibaba: { color: '#f97316', barColor: '#f97316', logo: '🟠' },
+  cursor: { color: '#eab308', barColor: '#eab308', logo: '⚡' },
+  openai: { color: '#10b981', barColor: '#10b981', logo: '◉' },
+  gemini: { color: '#60a5fa', barColor: '#60a5fa', logo: '✧' },
+  copilot: { color: '#a855f7', barColor: '#a855f7', logo: '🐙' },
+  openrouter: { color: '#ec4899', barColor: '#ec4899', logo: '⇄' },
+  deepseek: { color: '#3b82f6', barColor: '#3b82f6', logo: '🐋' },
+  windsurf: { color: '#06b6d4', barColor: '#06b6d4', logo: '🌊' },
+  zed: { color: '#f59e0b', barColor: '#f59e0b', logo: '⚡' },
+  grok: { color: '#e2e8f0', barColor: '#e2e8f0', logo: '𝕏' },
+  mistral: { color: '#fb923c', barColor: '#fb923c', logo: 'Ⓜ' },
+  openclaw: { color: '#f43f5e', barColor: '#f43f5e', logo: '🦞' },
+};
 
 export function fmtReset(ts) {
   if (!ts) return '';
@@ -712,10 +730,10 @@ export function handleEvent(e) {
   else if (e.kind === 'reload') location.reload();
 }
 
-export const WIDGET_ICONS = { rules: '⚡', chargecare: '🔋', nextup: '⏭️', moon: '🌙', wordclock: '🔤', clock: '🕒', weather: '⛅', forecast: '🌦️', media: '🎵', stat: '📈', gauge: '⏲️', chart: '📊', meters: '💾', quotas: '✳️', sessions: '🤖',
+export const WIDGET_ICONS = { rules: '⚡', chargecare: '🔋', nextup: '⏭️', moon: '🌙', wordclock: '🔤', clock: '🕒', weather: '⛅', forecast: '🌦️', media: '🎵', stat: '📈', gauge: '⏲️', chart: '📊', meters: '💾', quotas: '✳️', codexbar: '🧭', sessions: '🤖',
   github: '🐙', processes: '⚙️', shortcuts: '🎛️', button: '🔘', worldclock: '🌍', calendar: '📅', pomodoro: '🍅', countdown: '⏳', note: '📝', command: '💻',
   push: '📡', inbox: '📬', label: '🔤', analog: '🕰️', progress: '📆', stopwatch: '⏱️', timer: '⏲️', counter: '🔢', breathe: '🫁', quote: '💬',
-  checklist: '✅', battery: '🔋', topprocs: '🔥', quotaring: '🎯', volume: '🔊', sun: '🌅', air: '🍃', hackernews: '📰', exchange: '💱', crypto: '🪙', image: '🖼️' };
+  checklist: '✅', battery: '🔋', topprocs: '🔥', quotaring: '🎯', volume: '🔊', sun: '🌅', air: '🍃', hackernews: '📰', exchange: '💱', crypto: '🪙', image: '🖼️', stack: '🗂️' };
 
 // ================================================================= pages
 export const pager = $('pager');

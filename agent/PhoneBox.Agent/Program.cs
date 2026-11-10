@@ -501,7 +501,12 @@ app.MapPost("/api/volume", (int? level, string? op, AudioControl audio) =>
     return ok ? Results.Json(audio.Snapshot()) : Results.BadRequest();
 });
 
-app.MapGet("/api/quotas", (QuotaMonitor q) => Results.Json(new { providers = q.Snapshot() }));
+app.MapGet("/api/quotas", (QuotaMonitor q) => Results.Json(new
+{
+    providers = q.Snapshot(),
+    configured = q.ConfiguredProviders(),
+    overview = q.Overview(),
+}));
 
 app.MapGet("/api/work", (SessionMonitor s, GitHubMonitor gh) => Results.Json(new
 {

@@ -521,16 +521,17 @@ dd { margin: 0; word-break: break-all; }
 
       <div class="card">
         <h3>AI quotas &amp; CodexBar</h3>
-        <p class="hint" style="margin:0 0 12px">Choose which AI coding services to track and show on the panel, and configure rotation.</p>
-        <div class="field"><label>Tracked AI services</label>
-          <div class="opts">
+        <p class="hint" style="margin:0 0 12px">Choose which AI services configured in CodexBar to track and show on the panel, and configure window rotation.</p>
+        <div class="field"><label>Configured AI services (CodexBar)</label>
+          <div class="opts" id="cbProviders">
             <label class="check"><input type="checkbox" id="cb_claude"> Claude</label>
             <label class="check"><input type="checkbox" id="cb_codex"> Codex</label>
             <label class="check"><input type="checkbox" id="cb_antigravity"> Antigravity</label>
           </div>
         </div>
         <div class="field" style="margin-top:10px">
-          <label class="check"><input type="checkbox" data-bind="codexBar.rotate"> Rotate providers automatically</label>
+          <label class="check"><input type="checkbox" data-bind="codexBar.showOverview"> Show Overview as first rotating window</label>
+          <label class="check"><input type="checkbox" data-bind="codexBar.rotate"> Rotate windows automatically</label>
         </div>
         <div class="row" style="gap:12px;margin-top:10px">
           <div class="field" style="max-width:180px"><label>Cards at a time</label><input type="number" min="0" max="6" data-bind="codexBar.pageSize" data-type="int"><span class="hint">0 = show all</span></div>
@@ -842,6 +843,7 @@ function renderPageEditor() {
   $('stage').hidden = !p;
   if (!p) { $('peHead').replaceChildren(h('p', { class: 'lead' }, 'No pages. Add one with "New page".')); $('peRest').replaceChildren(); return; }
   p.widgets ??= [];
+  if (selWidget < 0 && p.widgets.length === 1) selWidget = 0;
   const move = (d) => { const j = selPage + d; [cfg.pages[selPage], cfg.pages[j]] = [cfg.pages[j], cfg.pages[selPage]]; selPage = j; renderPages(); changed(); };
   $('peHead').replaceChildren(
     h('div', { class: 'card' },
@@ -1280,8 +1282,20 @@ function optionField(w, o, onValChange) {
       return field(h('select', { onchange: (e) => set(o.key, e.target.value) }, ...o.choices.map(([k, l]) => h('option', { value: k, selected: k === v }, l))));
     case 'multi': {
       const cur = Array.isArray(v) ? v : [];
-      return field(h('div', { class: 'opts' }, ...o.choices.map(([k, l]) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: cur.includes(k), onchange: (e) => {
-        const next = o.choices.map((c) => c[0]).filter((x) => (x === k ? e.target.checked : cur.includes(x)));
+      if (o.key === 'providers' && (w.type === 'codexbar' || w.type === 'quotas')) {
+        return field(renderCodexBarMultiPicker(cur, (next) => {
+          set(o.key, next);
+          cfg.codexBar ??= {};
+          cfg.codexBar.customized = true;
+          if (!onValChange) {
+            cfg.codexBar.providers = next;
+            bindCodexBar();
+          }
+        }));
+      }
+      const choices = o.choices || [];
+      return field(h('div', { class: 'opts' }, ...choices.map(([k, l]) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: cur.includes(k), onchange: (e) => {
+        const next = choices.map((c) => c[0]).filter((x) => (x === k ? e.target.checked : cur.includes(x)));
         set(o.key, next.length ? next : cur);
         if (!next.length) { e.target.checked = true; toast('Keep at least one', true); }
       } }), l))));
@@ -2021,22 +2035,174 @@ function bindForm() {
   $('nbv').textContent = Math.round(cfg.night.brightness * 100) + '%';
 }
 
-function bindCodexBar() {
-  cfg.codexBar ??= { providers: ['claude', 'codex', 'antigravity'], rotate: true, pageSize: 2, rotateInterval: 8 };
-  if (cfg.codexBar.rotate === undefined) cfg.codexBar.rotate = true;
-  const provs = Array.isArray(cfg.codexBar.providers) ? cfg.codexBar.providers : ['claude', 'codex', 'antigravity'];
-  ['claude', 'codex', 'antigravity'].forEach((id) => {
-    const el = $('cb_' + id);
-    if (!el) return;
-    el.checked = provs.includes(id);
-    el.onchange = () => {
-      const cur = Array.isArray(cfg.codexBar.providers) ? cfg.codexBar.providers : [];
-      const next = ['claude', 'codex', 'antigravity'].filter((x) => x === id ? el.checked : cur.includes(x));
-      if (!next.length) { el.checked = true; toast('Keep at least one AI service', true); return; }
-      cfg.codexBar.providers = next;
-      changed();
-    };
+let codexBarChoices = [
+  ['claude', 'Claude'],
+  ['codex', 'Codex'],
+  ['antigravity', 'Antigravity'],
+  ['alibabatokenplan', 'Alibaba Token Plan'],
+  ['cursor', 'Cursor'],
+];
+let codexBarEnabledSet = new Set(['claude', 'codex', 'antigravity', 'alibabatokenplan', 'cursor']);
+
+function getCodexBarChoices(extraIds = []) {
+  const map = new Map(codexBarChoices);
+  for (const id of extraIds) {
+    if (id && !map.has(id)) map.set(id, id.charAt(0).toUpperCase() + id.slice(1));
+  }
+  const entries = [...map.entries()];
+  const selectedSet = new Set(extraIds);
+  entries.sort((a, b) => {
+    const aTop = codexBarEnabledSet.has(a[0]) || selectedSet.has(a[0]) ? 0 : 1;
+    const bTop = codexBarEnabledSet.has(b[0]) || selectedSet.has(b[0]) ? 0 : 1;
+    if (aTop !== bTop) return aTop - bTop;
+    const aEn = codexBarEnabledSet.has(a[0]) ? 0 : 1;
+    const bEn = codexBarEnabledSet.has(b[0]) ? 0 : 1;
+    if (aEn !== bEn) return aEn - bEn;
+    return 0;
   });
+  return entries;
+}
+
+function renderCodexBarMultiPicker(initialSelected, onChange) {
+  let cur = Array.isArray(initialSelected) && initialSelected.length
+    ? [...initialSelected]
+    : [...codexBarEnabledSet];
+  let query = '';
+  const allChoices = getCodexBarChoices(cur);
+  const listBox = h('div', {
+    class: 'opts',
+    style: {
+      maxHeight: '220px',
+      overflowY: 'auto',
+      padding: '8px',
+      border: '1px solid var(--border, rgba(255,255,255,0.1))',
+      borderRadius: '8px',
+      background: 'rgba(0,0,0,0.18)',
+    },
+  });
+
+  const paintList = () => {
+    const q = query.trim().toLowerCase();
+    const filtered = allChoices.filter(([id, label]) => !q || id.toLowerCase().includes(q) || label.toLowerCase().includes(q));
+    listBox.replaceChildren(...(filtered.length ? filtered.map(([id, label]) => {
+      const isEnabled = codexBarEnabledSet.has(id);
+      const input = h('input', {
+        type: 'checkbox',
+        checked: cur.includes(id),
+        onchange: () => {
+          const next = allChoices.map((c) => c[0]).filter((x) => (x === id ? input.checked : cur.includes(x)));
+          if (!next.length) { input.checked = true; toast('Keep at least one provider', true); return; }
+          cur = next;
+          onChange(next);
+        },
+      });
+      return h('label', { class: 'check', title: isEnabled ? `${label} (enabled in CodexBar)` : label },
+        input,
+        ' ' + label,
+        isEnabled ? h('span', { style: { color: '#22c55e', fontSize: '10px', marginLeft: '4px' }, title: 'Enabled in CodexBar' }, '●') : null
+      );
+    }) : [h('span', { class: 'hint' }, 'No matching providers')]));
+  };
+
+  const searchInput = h('input', {
+    type: 'search',
+    placeholder: `Search providers (${allChoices.length} available)…`,
+    style: { flex: '1', minWidth: '140px', padding: '5px 8px', fontSize: '12.5px' },
+    oninput: (e) => { query = e.target.value; paintList(); },
+  });
+
+  const selectActiveBtn = h('button', {
+    type: 'button',
+    class: 'btn sm',
+    title: 'Select providers currently enabled in CodexBar',
+    onclick: () => {
+      const activeIds = [...codexBarEnabledSet];
+      if (!activeIds.length) return;
+      cur = activeIds;
+      paintList();
+      onChange(cur);
+    },
+  }, '● Select Active');
+
+  paintList();
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', width: '100%' } },
+    h('div', { class: 'row', style: { gap: '6px' } }, searchInput, selectActiveBtn),
+    listBox
+  );
+}
+
+async function loadCodexBarProviders() {
+  try {
+    const q = await (await fetch('/api/quotas')).json();
+    const map = new Map();
+    const enSet = new Set();
+    for (const c of (q.configured || [])) {
+      if (c?.id) {
+        map.set(c.id, c.name || c.id);
+        if (c.enabled) enSet.add(c.id);
+      }
+    }
+    for (const p of (q.providers || [])) {
+      if (p?.id) {
+        if (!map.has(p.id)) map.set(p.id, p.name || p.id);
+        if ((p.limits && p.limits.length > 0) || p.cost || !p.error) enSet.add(p.id);
+      }
+    }
+    if (!map.size) {
+      for (const [k, l] of codexBarChoices) map.set(k, l);
+    }
+    if (enSet.size) codexBarEnabledSet = enSet;
+    codexBarChoices = [...map.entries()];
+    const defaultEnabled = [...codexBarEnabledSet];
+    for (const wDef of (catalog.widgets || [])) {
+      if (wDef.type === 'codexbar' || wDef.type === 'quotas') {
+        const opt = (wDef.options || []).find((o) => o.key === 'providers');
+        if (opt) {
+          opt.choices = codexBarChoices;
+          opt.default = defaultEnabled.length ? defaultEnabled : codexBarChoices.slice(0, 5).map((c) => c[0]);
+        }
+      } else if (wDef.type === 'quotaring') {
+        const opt = (wDef.options || []).find((o) => o.key === 'provider');
+        if (opt) opt.choices = codexBarChoices;
+      }
+    }
+  } catch (_) {}
+}
+
+function syncCodexBarProvidersAcrossPages(next) {
+  for (const p of (cfg.pages || [])) {
+    for (const w of (p.widgets || [])) {
+      if (w.type === 'codexbar' || (p.id === 'codexbar' && w.type === 'quotas')) {
+        w.options ??= {};
+        w.options.providers = [...next];
+      } else if (w.type === 'stack' && Array.isArray(w.options?.widgets)) {
+        for (const sub of w.options.widgets) {
+          if (sub && typeof sub === 'object' && (sub.type === 'codexbar' || sub.type === 'quotas')) {
+            sub.options ??= {};
+            sub.options.providers = [...next];
+          }
+        }
+      }
+    }
+  }
+}
+
+function bindCodexBar() {
+  const defaultIds = [...codexBarEnabledSet];
+  cfg.codexBar ??= { providers: defaultIds, rotate: true, showOverview: true, pageSize: 2, rotateInterval: 8 };
+  if (cfg.codexBar.rotate === undefined) cfg.codexBar.rotate = true;
+  if (cfg.codexBar.showOverview === undefined) cfg.codexBar.showOverview = true;
+  const provs = Array.isArray(cfg.codexBar.providers) && cfg.codexBar.providers.length ? cfg.codexBar.providers : defaultIds;
+  const box = $('cbProviders');
+  if (!box) return;
+  box.replaceChildren(renderCodexBarMultiPicker(provs, (next) => {
+    cfg.codexBar.providers = next;
+    cfg.codexBar.customized = true;
+    syncCodexBarProvidersAcrossPages(next);
+    renderInspector();
+    renderCanvas();
+    changed();
+  }));
 }
 
 async function searchCity() {
@@ -2099,11 +2265,12 @@ async function loadInfo() {
 // ---------------------------------------------------------------- load / save
 async function load() {
   if (!catalog.widgets.length) catalog = await (await fetch('/api/catalog')).json();
+  await loadCodexBarProviders();
   const res = await fetch('/api/settings');
   cfgVersion = res.headers.get('X-Config-Version');
   cfg = await res.json();
   cfg.pages ??= []; cfg.shortcuts ??= []; cfg.rules ??= []; cfg.display ??= {}; cfg.night ??= {}; cfg.weather ??= {}; cfg.lan ??= { enabled: false, port: 8766 }; cfg.updates ??= { auto: true, repo: 'ersinkoc/phonebox' }; cfg.claude ??= { phoneApprovals: true, timeoutSec: 90, onlyWhenAway: false };
-  cfg.codexBar ??= { providers: ['claude', 'codex', 'antigravity'], rotate: true, pageSize: 2, rotateInterval: 8 };
+  cfg.codexBar ??= { providers: codexBarChoices.map((c) => c[0]), rotate: true, showOverview: true, pageSize: 2, rotateInterval: 8 };
   for (const [k, v] of Object.entries({ idleReturnSec: 90, switchCountdownSec: 3, touchGraceSec: 20, minDwellSec: 15, holdMaxMin: 30, keepAwake: true })) cfg.display[k] ??= v;
   cfg.charge ??= { enabled: false, min: 50, max: 80, method: 'ha' };
   saved = JSON.stringify(cfg);

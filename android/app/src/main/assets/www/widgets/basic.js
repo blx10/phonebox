@@ -290,9 +290,34 @@ W.meters = {
   },
 };
 
+function resolveQuotaProviders(o) {
+  const set = new Set();
+  if (Array.isArray(o?.providers) && o.providers.length) {
+    for (const id of o.providers) set.add(id);
+  }
+  if (!set.size || !cfg.codexBar?.customized) {
+    for (const id of (cfg.codexBar?.providers || [])) set.add(id);
+    for (const c of (D.quotas?.configured || [])) {
+      if (c?.enabled && c.id) set.add(c.id);
+    }
+  }
+  if (set.has('alibaba') || set.has('alibabatokenplan')) {
+    set.add('alibaba');
+    set.add('alibabatokenplan');
+  }
+  if (!set.size) {
+    ['claude', 'codex', 'antigravity', 'alibabatokenplan', 'cursor'].forEach((id) => set.add(id));
+  }
+  return [...set];
+}
+
 W.quotas = {
   needs: ['quotas', 'tick'],
-  create(box, { o }) {
+  create(box, ctx) {
+    const { o, w, page } = ctx;
+    if (w?.type === 'codexbar' || w?.id?.includes('codexbar') || page?.id === 'codexbar') {
+      return W.codexbar.create(box, ctx);
+    }
     const tokens = (n) => n == null ? '—' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
     const grid = h('div', 'q-grid', h('div', 'empty', 'Quota data arrives once the computer is connected.'));
     box.append(grid);
@@ -323,18 +348,20 @@ W.quotas = {
       return cfg.codexBar?.rotateInterval ?? 8;
     };
 
-    const getProviders = () => {
-      if (Array.isArray(o.providers)) return o.providers;
-      if (Array.isArray(cfg.codexBar?.providers)) return cfg.codexBar.providers;
-      return ['claude', 'codex', 'antigravity'];
+    const getProviders = () => resolveQuotaProviders(o);
+
+    const getActiveList = () => {
+      const want = getProviders();
+      const matched = quotaProviders().filter((p) => want.includes(p.id));
+      const active = matched.filter((p) => (p.limits && p.limits.length > 0) || p.extra || !p.error);
+      return active.length ? active : matched;
     };
 
     const render = () => {
       if (!D.quotas) return;
-      const want = getProviders();
-      const list = quotaProviders().filter((p) => want.includes(p.id));
+      const list = getActiveList();
       grid.replaceChildren();
-      if (!list.length) { grid.appendChild(h('div', 'empty', want.length ? 'Quota data is unavailable for the selected providers' : 'No quota providers enabled')); return; }
+      if (!list.length) { grid.appendChild(h('div', 'empty', 'No quota providers enabled')); return; }
 
       const ps = getPageSize();
       const needsPaging = isRotateEnabled() && ps > 0 && list.length > ps;
@@ -408,8 +435,7 @@ W.quotas = {
 
     grid.onclick = () => {
       const ps = getPageSize();
-      const want = getProviders();
-      const list = quotaProviders().filter((p) => want.includes(p.id));
+      const list = getActiveList();
       if (ps > 0 && list.length > ps) {
         offset = (offset + 1) % list.length;
         lastRotate = Date.now();
@@ -421,11 +447,15 @@ W.quotas = {
     return {
       update(kind) {
         if (kind === 'tick') {
+          const stackItem = box.closest('.stack-item');
+          if (stackItem && !stackItem.classList.contains('active')) {
+            lastRotate = Date.now();
+            return;
+          }
           const sec = getRotateInterval();
           if (sec > 0 && Date.now() - lastRotate >= sec * 1000) {
             const ps = getPageSize();
-            const want = getProviders();
-            const list = quotaProviders().filter((p) => want.includes(p.id));
+            const list = getActiveList();
             if (ps > 0 && list.length > ps) {
               offset = (offset + 1) % list.length;
               lastRotate = Date.now();
@@ -442,7 +472,565 @@ W.quotas = {
   },
 };
 
-W.codexbar = W.quotas;
+const TR_MONTHS = ['Oca', 'Şub', 'Mar', 'Nis', 'May', 'Haz', 'Tem', 'Ağu', 'Eyl', 'Eki', 'Kas', 'Ara'];
+
+function fmtTokTr(n) {
+  const v = Number(n || 0);
+  if (v >= 1e9) return (v / 1e9).toFixed(2).replace(/\.?0+$/, '').replace('.', ',') + 'B';
+  if (v >= 1e6) return (v >= 1e8 ? Math.round(v / 1e6).toString() : (v / 1e6).toFixed(1).replace(/\.0$/, '')).replace('.', ',') + 'M';
+  if (v >= 1e3) return (v >= 1e5 ? Math.round(v / 1e3).toString() : (v / 1e3).toFixed(1).replace(/\.0$/, '')).replace('.', ',') + 'K';
+  return String(Math.round(v));
+}
+
+function fmtUsd(v, approx = false) {
+  const num = Number(v || 0);
+  return (approx ? '~$' : '$') + num.toFixed(2);
+}
+
+function fmtDurTr(ms) {
+  const totalMin = Math.max(0, Math.round(ms / 60000));
+  if (totalMin < 1) return 'az önce';
+  if (totalMin < 60) return `${totalMin}dk`;
+  const hr = Math.floor(totalMin / 60);
+  const min = totalMin % 60;
+  if (hr < 24) return min > 0 ? `${hr}sa ${min}dk` : `${hr}sa`;
+  const d = Math.floor(hr / 24);
+  const remHr = hr % 24;
+  return remHr > 0 ? `${d}g ${remHr}sa` : `${d}g`;
+}
+
+function fmtResetTr(ts) {
+  if (!ts) return '';
+  const left = ts - Date.now();
+  if (left <= 0) return 'Sıfırlanıyor…';
+  return `${fmtDurTr(left)} içinde sıfırlanır`;
+}
+
+function fmtUpdatedTr(ts) {
+  if (!ts) return 'Az önce güncellendi';
+  const diff = Date.now() - ts;
+  if (diff < 90_000) return 'Az önce güncellendi';
+  return `${fmtDurTr(diff)} önce güncellendi`;
+}
+
+function fmtShortDateTr(dateStr) {
+  if (!dateStr) return '';
+  const parts = String(dateStr).split('-');
+  if (parts.length !== 3) return dateStr;
+  const m = parseInt(parts[1], 10) - 1;
+  const d = parseInt(parts[2], 10);
+  return `${d} ${TR_MONTHS[m] || parts[1]}`;
+}
+
+function trLimitLabel(label) {
+  const s = String(label || '');
+  const low = s.toLowerCase();
+  if (low === 'session' || low === '5-hour session' || low === '5-hour') return 'Oturum';
+  if (low === 'weekly') return 'Haftalık';
+  if (low === 'credits') return 'Krediler';
+  if (low === 'gemini 5-hour') return 'Gemini 5-Saat';
+  if (low === 'gemini weekly') return 'Gemini Haftalık';
+  if (low === 'claude/gpt 5-hour') return 'Claude/GPT 5-Saat';
+  if (low === 'claude/gpt weekly') return 'Claude/GPT Haftalık';
+  return s;
+}
+
+function buildPaceLineTr(l) {
+  const p = l.pace;
+  if (p) {
+    const parts = [];
+    const delta = p.deltaPercent;
+    if (delta != null) {
+      const abs = Math.abs(Math.round(delta));
+      if (delta < 0) parts.push({ text: `%${abs} rezervde`, cls: 'reserve' });
+      else if (delta > 0) parts.push({ text: `%${abs} açıkta`, cls: 'deficit' });
+      else parts.push({ text: 'Normal hızda', cls: 'ontrack' });
+    }
+    if (p.willLastToReset === false && p.etaSeconds > 0) {
+      parts.push({ text: `${fmtDurTr(p.etaSeconds * 1000)} içinde biter`, cls: 'deficit' });
+    } else if (p.willLastToReset === true) {
+      parts.push({ text: 'Sıfırlamaya kadar sürer', cls: 'reserve' });
+    }
+    if (p.expectedUsedPercent != null && p.willLastToReset !== false) {
+      parts.push({ text: `Beklenen: %${Math.round(p.expectedUsedPercent)}`, cls: 'muted' });
+    }
+    return parts;
+  }
+  const fb = paceInfo(l);
+  if (!fb) return [];
+  const cls = fb.cls === 'over' || fb.cls === 'fast' ? 'deficit' : 'reserve';
+  return [{ text: fb.text === 'Plenty left' ? 'Sıfırlamaya kadar sürer' : fb.text, cls }];
+}
+
+W.codexbar = {
+  needs: ['quotas', 'tick'],
+  create(box, { o }) {
+    box.classList.add('w-codexbar');
+    const root = h('div', 'cb-root', h('div', 'empty', 'CodexBar verileri bilgisayar bağlandığında yüklenir…'));
+    box.append(root);
+
+    let winIdx = 0;
+    let lastRotate = Date.now();
+    let lastRender = 0;
+
+    const isRotateEnabled = () => {
+      if (o.rotate !== undefined && o.rotate !== null) return !!o.rotate;
+      if (cfg.codexBar?.rotate !== undefined && cfg.codexBar?.rotate !== null) return !!cfg.codexBar.rotate;
+      return true;
+    };
+
+    const isOverviewEnabled = () => {
+      if (o.showOverview !== undefined && o.showOverview !== null) return !!o.showOverview;
+      if (cfg.codexBar?.showOverview !== undefined && cfg.codexBar?.showOverview !== null) return !!cfg.codexBar.showOverview;
+      return true;
+    };
+
+    const getRotateInterval = () => {
+      if (!isRotateEnabled()) return 0;
+      if (o.rotateInterval !== undefined && o.rotateInterval !== null && o.rotateInterval !== '') {
+        const n = Number(o.rotateInterval);
+        return isNaN(n) ? 8 : n;
+      }
+      return cfg.codexBar?.rotateInterval ?? 8;
+    };
+
+    const getWantedProviders = () => resolveQuotaProviders(o);
+
+    const getWindows = () => {
+      if (!D.quotas) return [];
+      const want = getWantedProviders();
+      const all = quotaProviders();
+      const selected = all.filter((p) => want.includes(p.id));
+      const pool = selected.length ? selected : all;
+      const activePlans = pool.filter((p) =>
+        (p.limits && p.limits.length > 0) ||
+        (p.cost && (p.cost.last30DaysTokens > 0 || p.cost.last30DaysCostUsd > 0)) ||
+        p.extra
+      );
+      const plans = activePlans.length ? activePlans : pool;
+
+      const windows = [];
+      if (isOverviewEnabled() && (D.quotas.overview || plans.length > 0)) {
+        windows.push({
+          kind: 'overview',
+          id: '__overview__',
+          label: 'Genel Bakış',
+          shortLabel: 'Genel',
+          icon: '📊',
+          color: '#f97316',
+        });
+      }
+      for (const p of plans) {
+        const st = Q_STYLE[p.id] || { color: '#38bdf8', barColor: '#38bdf8', logo: '●' };
+        windows.push({
+          kind: 'plan',
+          id: p.id,
+          label: p.name,
+          shortLabel: p.name.replace(/\s+Token\s+Plan$/i, ''),
+          icon: st.logo,
+          color: st.color,
+          barColor: st.barColor || st.color,
+          provider: p,
+        });
+      }
+      return windows;
+    };
+
+    const renderOverviewWindow = (windows) => {
+      const ov = D.quotas?.overview;
+      const allProvs = quotaProviders();
+      const totalTokens = ov?.totalTokens30d ?? allProvs.reduce((s, p) => s + (p.cost?.last30DaysTokens || 0), 0);
+      const totalCost = ov?.totalCost30dUsd ?? allProvs.reduce((s, p) => s + (p.cost?.last30DaysCostUsd || 0), 0);
+      const subs = ov?.subscriptions?.length
+        ? ov.subscriptions
+        : allProvs.map((p) => ({
+            id: p.id,
+            name: p.name,
+            plan: p.plan,
+            tokens30d: p.cost?.last30DaysTokens || 0,
+            cost30dUsd: p.cost?.last30DaysCostUsd || 0,
+            primaryRemainingPercent: p.limits?.[0] ? Math.max(0, 100 - p.limits[0].percent) : null,
+          }));
+      const topModels = ov?.topModels || [];
+      const histDays = ov?.historyDays || 30;
+
+      const card = h('div', 'cb-window cb-overview');
+      card.style.setProperty('--q', '#f97316');
+
+      const head = h('div', 'cb-head',
+        h('div', 'cb-head-left',
+          h('span', 'cb-brand-bars', h('i'), h('i'), h('i')),
+          h('span', 'cb-head-title', 'CodexBar'),
+          h('span', 'cb-head-badge', 'Yerel kullanım anlık görüntüsü')
+        )
+      );
+
+      const hero = h('div', 'cb-ov-hero',
+        h('div', 'cb-ov-hero-col',
+          h('div', 'cb-ov-kicker', `Kaydedilen tokenlar · ${histDays} GÜN`),
+          h('div', 'cb-ov-big-tok', fmtTokTr(totalTokens))
+        ),
+        h('div', 'cb-ov-hero-col cb-ov-hero-right',
+          h('div', 'cb-ov-kicker', `Tahmini ${histDays}-GÜN HARCAMA`),
+          h('div', 'cb-ov-spend-row',
+            h('div', 'cb-ov-spend-meta',
+              h('span', null, `USD · ${histDays}/${histDays} gün`),
+              h('small', null, `${subs.length} abonelik · yerel istatistikler`)
+            ),
+            h('div', 'cb-ov-big-cost', fmtUsd(totalCost, true))
+          )
+        )
+      );
+
+      const subRows = subs.slice(0, 5).map((s, idx) => {
+        const st = Q_STYLE[s.id] || { color: '#94a3b8', logo: '●' };
+        const planTxt = s.plan && s.plan.toLowerCase() !== s.name.toLowerCase() ? s.plan : '';
+        let rightTxt = '';
+        if (s.tokens30d > 0 || s.cost30dUsd > 0) {
+          rightTxt = `${fmtTokTr(s.tokens30d)} · ${fmtUsd(s.cost30dUsd, true)}`;
+        } else if (s.primaryRemainingPercent != null) {
+          rightTxt = `%${Math.round(s.primaryRemainingPercent)} kaldı`;
+        } else {
+          rightTxt = 'Aktif';
+        }
+        const row = h('div', 'cb-ov-item',
+          h('span', 'cb-ov-bar'),
+          h('span', 'cb-ov-idx', String(idx + 1).padStart(2, '0')),
+          h('span', 'cb-ov-name', s.name, planTxt ? h('small', 'cb-ov-plan', ' · ' + planTxt) : null),
+          h('span', 'cb-ov-val', rightTxt)
+        );
+        row.style.setProperty('--c', st.color);
+        const targetWinIdx = windows.findIndex((wItem) => wItem.id === s.id);
+        if (targetWinIdx >= 0) {
+          row.onclick = (e) => {
+            e.stopPropagation();
+            winIdx = targetWinIdx;
+            lastRotate = Date.now();
+            render();
+            haptic();
+          };
+        }
+        return row;
+      });
+
+      const modelRows = topModels.slice(0, 4).map((m) => {
+        const st = Q_STYLE[m.providerId] || { color: '#818cf8' };
+        const row = h('div', 'cb-ov-item cb-ov-model-item',
+          h('span', 'cb-ov-bar'),
+          h('span', 'cb-ov-dot', '•'),
+          h('div', 'cb-ov-model-info',
+            h('span', 'cb-ov-model-name', m.name),
+            h('small', 'cb-ov-model-sub', m.providerName + (m.subModels ? ` · ${m.subModels}` : ''))
+          ),
+          h('span', 'cb-ov-val', (m.tokens30d > 0 ? `${fmtTokTr(m.tokens30d)} · ` : '') + fmtUsd(m.cost30dUsd, true))
+        );
+        row.style.setProperty('--c', st.color);
+        return row;
+      });
+
+      const cols = h('div', 'cb-ov-cols',
+        h('div', 'cb-ov-col',
+          h('div', 'cb-sec-head', h('span', null, 'ABONELİKLER'), h('span', 'cb-sec-meta', `${subs.length} BAĞLI`)),
+          h('div', 'cb-ov-list', ...(subRows.length ? subRows : [h('div', 'cb-muted', 'Abonelik bulunamadı')]))
+        ),
+        h('div', 'cb-ov-col',
+          h('div', 'cb-sec-head', h('span', null, 'EN İYİ MODELLER'), h('span', 'cb-sec-meta', 'KISMİ')),
+          h('div', 'cb-ov-list', ...(modelRows.length ? modelRows : [h('div', 'cb-muted', 'Model verisi bekleniyor')])),
+          h('div', 'cb-ov-note', 'Yalnızca toplam kullanım, plan katmanı ve tahmini harcama dahildir.')
+        )
+      );
+
+      const nowDate = new Date(ov?.updatedAt || Date.now()).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
+      const foot = h('div', 'cb-ov-foot',
+        h('span', null, '🛡️ Yerel veriler · Yalnızca toplu istatistikler'),
+        h('span', null, `${nowDate} tarihine kadar veriler`)
+      );
+
+      card.append(head, hero, cols, foot);
+      return card;
+    };
+
+    const renderPlanWindow = (wItem, windows) => {
+      const p = wItem.provider;
+      const st = Q_STYLE[p.id] || { color: '#38bdf8', barColor: '#38bdf8', logo: '●' };
+      const card = h('div', 'cb-window cb-plan');
+      card.style.setProperty('--q', st.color);
+      card.style.setProperty('--qbar', st.barColor || st.color);
+
+      const planBadge = p.plan && p.plan.toLowerCase() !== p.name.toLowerCase() ? p.plan : null;
+
+      const head = h('div', 'cb-head',
+        h('div', 'cb-head-left',
+          h('span', 'cb-plan-logo', st.logo),
+          h('div', 'cb-plan-titles',
+            h('div', 'cb-plan-title-row',
+              h('span', 'cb-head-title', p.name),
+              planBadge ? h('span', 'cb-plan-pill', planBadge) : null,
+              p.accountEmail ? h('span', 'cb-plan-email', p.accountEmail) : null
+            ),
+            h('div', 'cb-plan-upd', fmtUpdatedTr(p.updatedAt))
+          )
+        )
+      );
+
+      const limitNodes = (p.limits || []).map((l) => {
+        const usedPct = Math.max(0, Math.min(100, Number(l.percent || 0)));
+        const remPct = Math.max(0, Math.min(100, 100 - usedPct));
+        const labelTr = trLimitLabel(l.label);
+
+        let barColor = st.barColor || st.color;
+        if (remPct <= 5 || l.severity === 'critical') barColor = '#ef4444';
+        else if (remPct <= 20 || l.severity === 'warning') barColor = '#f59e0b';
+
+        let expectedRem = null;
+        let isDeficit = false;
+        if (l.pace?.expectedUsedPercent != null) {
+          expectedRem = Math.max(0, Math.min(100, 100 - l.pace.expectedUsedPercent));
+          isDeficit = (l.pace.deltaPercent || 0) > 0;
+        } else if (l.resetsAt && l.windowSec) {
+          const elapsed = Math.min(1, Math.max(0, 1 - (l.resetsAt - Date.now()) / (l.windowSec * 1000)));
+          expectedRem = Math.max(0, Math.min(100, (1 - elapsed) * 100));
+          isDeficit = usedPct > elapsed * 100 + 2;
+        }
+
+        const fillEl = h('div', 'cb-bar-fill');
+        fillEl.style.width = `${remPct}%`;
+        fillEl.style.background = barColor;
+
+        const markerEl = expectedRem != null ? h('div', 'cb-bar-marker' + (isDeficit ? ' deficit' : '')) : null;
+        if (markerEl) markerEl.style.left = `${expectedRem}%`;
+
+        const trackEl = h('div', 'cb-bar-track', fillEl, h('div', 'cb-bar-segs'), markerEl);
+
+        const subLines = [];
+        const paceParts = buildPaceLineTr(l);
+        if (paceParts.length) {
+          const paceLine = h('div', 'cb-lim-pace');
+          paceParts.forEach((pt, idx) => {
+            if (idx > 0) paceLine.appendChild(h('span', 'cb-dot-sep', ' · '));
+            paceLine.appendChild(h('span', 'cb-pace-' + pt.cls, pt.text));
+          });
+          subLines.push(paceLine);
+        }
+
+        if (l.resetDescription && (l.resetDescription.includes('/') || /credit/i.test(l.resetDescription))) {
+          subLines.push(h('div', 'cb-lim-credits', l.resetDescription));
+        }
+
+        if (l.resetsAt) {
+          const daysLeft = (l.resetsAt - Date.now()) / 86_400_000;
+          if (daysLeft >= 1.2 && remPct > 0) {
+            const perDay = (remPct / daysLeft).toFixed(2).replace('.', ',');
+            subLines.push(h('div', 'cb-lim-daily', `Sıfırlamaya kadar yetmesi için günde ≈ ${perDay}%`));
+          }
+        }
+
+        return h('div', 'cb-limit-item' + ((p.limits?.length || 0) >= 3 ? ' compact' : ''),
+          h('div', 'cb-lim-top',
+            h('span', 'cb-lim-title', `${labelTr} ${Math.round(remPct)}% kaldı`),
+            h('span', 'cb-lim-reset', fmtResetTr(l.resetsAt))
+          ),
+          trackEl,
+          ...(subLines.length ? [h('div', 'cb-lim-subs', ...subLines)] : [])
+        );
+      });
+
+      const hasCost = p.cost && (p.cost.last30DaysTokens > 0 || p.cost.last30DaysCostUsd > 0);
+      let costGridEl = null;
+      if (hasCost) {
+        const c = p.cost;
+        const recentTok = c.todayTokens > 0 ? c.todayTokens : (c.latestDayTokens || 0);
+        costGridEl = h('div', 'cb-cost-grid',
+          h('div', 'cb-cost-cell', h('span', 'cb-cost-lbl', 'Bugün'), h('b', 'cb-cost-val', fmtUsd(c.todayCostUsd || 0))),
+          h('div', 'cb-cost-cell', h('span', 'cb-cost-lbl', 'Tahmini: Geçerli pencere'), h('b', 'cb-cost-val', c.windowCostUsd != null ? fmtUsd(c.windowCostUsd) : '—')),
+          h('div', 'cb-cost-cell', h('span', 'cb-cost-lbl', 'Son tokenlar'), h('b', 'cb-cost-val', fmtTokTr(recentTok))),
+          h('div', 'cb-cost-cell', h('span', 'cb-cost-lbl', 'Tahmini: Geçerli pencere token'), h('b', 'cb-cost-val', c.windowTokens != null ? fmtTokTr(c.windowTokens) : '—')),
+          h('div', 'cb-cost-cell', h('span', 'cb-cost-lbl', '30d'), h('b', 'cb-cost-val', fmtUsd(c.last30DaysCostUsd || 0))),
+          h('div', 'cb-cost-cell', h('span', 'cb-cost-lbl', '30 günlük tokenlar'), h('b', 'cb-cost-val', fmtTokTr(c.last30DaysTokens || 0)))
+        );
+      }
+
+      const mainBox = h('div', 'cb-box-main',
+        h('div', 'cb-limits-wrap' + ((p.limits?.length || 0) >= 4 ? ' grid2' : ''),
+          ...(limitNodes.length ? limitNodes : [h('div', 'cb-muted', p.error || 'Kota verisi bulunamadı')])
+        ),
+        costGridEl
+      );
+
+      let sideBox = null;
+      if (hasCost) {
+        const c = p.cost;
+        const daily = (c.daily || []).slice(-16);
+        let sparkEl = null;
+        if (daily.length > 1) {
+          const maxTok = Math.max(1, ...daily.map((d) => d.totalTokens || 0));
+          const maxCost = Math.max(0, ...daily.map((d) => d.totalCost || 0));
+          const bars = daily.map((d) => {
+            const pct = Math.max(4, Math.round(((d.totalTokens || 0) / maxTok) * 100));
+            const isPeak = d.totalTokens === maxTok && maxTok > 0;
+            const bar = h('div', 'cb-spark-bar' + (isPeak ? ' peak' : ''));
+            bar.style.height = `${pct}%`;
+            bar.title = `${fmtShortDateTr(d.date)}: ${fmtUsd(d.totalCost)} · ${fmtTokTr(d.totalTokens)}`;
+            return h('div', 'cb-spark-col', bar);
+          });
+          sparkEl = h('div', 'cb-spark-box',
+            h('div', 'cb-spark-head',
+              h('span', null, `${fmtShortDateTr(daily[0].date)} – ${fmtShortDateTr(daily[daily.length - 1].date)}`),
+              h('span', null, `Maks: ${fmtTokTr(maxTok)} · $${Math.round(maxCost)}`)
+            ),
+            h('div', 'cb-spark-bars', ...bars)
+          );
+        }
+
+        const dayModels = c.latestDayModels?.length ? c.latestDayModels : (c.topModels30d || []);
+        const modelHeadTxt = c.latestDayDate
+          ? `${fmtShortDateTr(c.latestDayDate)}: ${fmtUsd(c.latestDayCostUsd || 0)} · ${fmtTokTr(c.latestDayTokens || 0)} tokens`
+          : `Son 30 Gün: ${fmtUsd(c.last30DaysCostUsd || 0)} · ${fmtTokTr(c.last30DaysTokens || 0)} tokens`;
+
+        const modelRows = dayModels.slice(0, 3).map((m) =>
+          h('div', 'cb-model-row',
+            h('span', 'cb-model-bar'),
+            h('div', 'cb-model-info',
+              h('div', 'cb-model-name', m.modelName),
+              h('div', 'cb-model-meta', `${fmtUsd(m.cost || 0)} · ${fmtTokTr(m.totalTokens || 0)}`)
+            )
+          )
+        );
+
+        const modelBoxEl = h('div', 'cb-models-box',
+          h('div', 'cb-models-head', modelHeadTxt),
+          h('div', 'cb-models-list', ...(modelRows.length ? modelRows : [h('div', 'cb-muted', 'Model detayı yok')]))
+        );
+
+        let bottomListEl = null;
+        if (c.topProjects?.length) {
+          bottomListEl = h('div', 'cb-proj-box',
+            h('div', 'cb-sec-head', h('span', null, 'PROJELER'), h('span', 'cb-sec-meta', 'SON 30G')),
+            ...c.topProjects.slice(0, 3).map((pr) =>
+              h('div', 'cb-proj-row',
+                h('span', 'cb-proj-name', pr.name),
+                h('span', 'cb-proj-val', `${fmtUsd(pr.totalCost)} · ${fmtTokTr(pr.totalTokens)}`)
+              )
+            )
+          );
+        } else if (c.topModels30d?.length) {
+          bottomListEl = h('div', 'cb-proj-box',
+            h('div', 'cb-sec-head', h('span', null, '30G TOPLAM MODELLER'), h('span', 'cb-sec-meta', `${c.historyDays || 30}G`)),
+            ...c.topModels30d.slice(0, 3).map((tm) =>
+              h('div', 'cb-proj-row',
+                h('span', 'cb-proj-name', tm.modelName),
+                h('span', 'cb-proj-val', `${fmtUsd(tm.cost)} · ${fmtTokTr(tm.totalTokens)}`)
+              )
+            )
+          );
+        }
+
+        sideBox = h('div', 'cb-box-side', sparkEl, modelBoxEl, bottomListEl);
+      } else {
+        const prim = p.limits?.[0];
+        if (prim) {
+          const usedPct = Math.max(0, Math.min(100, prim.percent || 0));
+          const remPct = Math.max(0, Math.min(100, 100 - usedPct));
+          const daysLeft = prim.resetsAt ? Math.max(0.1, (prim.resetsAt - Date.now()) / 86_400_000) : 0;
+          const dailyRate = daysLeft > 0 ? (remPct / daysLeft).toFixed(2).replace('.', ',') + '% / gün' : '—';
+
+          let usedStr = `%${usedPct.toFixed(1).replace('.', ',')}`;
+          let totalStr = `${Math.round(remPct)}% kaldı`;
+          const m = prim.resetDescription && /([\d,.]+)\s*\/\s*([\d,.]+)/.exec(prim.resetDescription);
+          if (m) {
+            usedStr = m[1];
+            totalStr = `/ ${m[2]} kredi`;
+          }
+
+          sideBox = h('div', 'cb-box-side cb-box-credits',
+            h('div', 'cb-sec-head', h('span', null, 'PLAN & KOTA ÖZETİ'), h('span', 'cb-sec-meta', (p.plan || 'AKTİF').toUpperCase())),
+            h('div', 'cb-credit-cards',
+              h('div', 'cb-credit-stat',
+                h('span', 'cb-cost-lbl', 'Kullanılan'),
+                h('b', 'cb-cost-val', usedStr),
+                h('small', null, totalStr)
+              ),
+              h('div', 'cb-credit-stat',
+                h('span', 'cb-cost-lbl', 'Kalan Kota'),
+                h('b', 'cb-cost-val', `%${Math.round(remPct)}`),
+                h('small', null, fmtResetTr(prim.resetsAt))
+              ),
+              h('div', 'cb-credit-stat',
+                h('span', 'cb-cost-lbl', 'İdeal Günlük Hız'),
+                h('b', 'cb-cost-val', `≈ ${dailyRate}`),
+                h('small', null, 'Sıfırlamaya yetmesi için')
+              ),
+              h('div', 'cb-credit-stat',
+                h('span', 'cb-cost-lbl', 'Tüketim Durumu'),
+                h('b', 'cb-cost-val', prim.pace?.deltaPercent > 0 ? `%${Math.round(prim.pace.deltaPercent)} Açıkta` : 'Dengeli'),
+                h('small', null, prim.pace?.etaSeconds ? `${fmtDurTr(prim.pace.etaSeconds * 1000)} içinde biter` : 'Sıfırlamaya kadar sürer')
+              )
+            )
+          );
+        }
+      }
+
+      const body = h('div', 'cb-plan-body' + (sideBox ? ' has-side' : ''), mainBox, sideBox);
+      card.append(head, body);
+      return card;
+    };
+
+    const render = () => {
+      if (!D.quotas) return;
+      const windows = getWindows();
+      root.replaceChildren();
+      if (!windows.length) {
+        root.appendChild(h('div', 'empty', 'CodexBar sağlayıcısı seçilmedi'));
+        return;
+      }
+      if (winIdx >= windows.length) winIdx = 0;
+      const cur = windows[winIdx];
+      const view = cur.kind === 'overview'
+        ? renderOverviewWindow(windows)
+        : renderPlanWindow(cur, windows);
+      root.appendChild(view);
+    };
+
+    root.onclick = () => {
+      const windows = getWindows();
+      if (windows.length > 1) {
+        winIdx = (winIdx + 1) % windows.length;
+        lastRotate = Date.now();
+        render();
+        haptic();
+      }
+    };
+
+    return {
+      update(kind) {
+        if (kind === 'tick') {
+          const stackItem = box.closest('.stack-item');
+          if (stackItem && !stackItem.classList.contains('active')) {
+            lastRotate = Date.now();
+            return;
+          }
+          const rawSec = getRotateInterval();
+          const sec = stackItem && rawSec > 6 ? 6 : rawSec;
+          if (sec > 0 && Date.now() - lastRotate >= sec * 1000) {
+            const windows = getWindows();
+            if (windows.length > 1) {
+              winIdx = (winIdx + 1) % windows.length;
+              lastRotate = Date.now();
+              render();
+            }
+          }
+          if (Date.now() - lastRender > 30_000) {
+            lastRender = Date.now();
+            render();
+          }
+          return;
+        }
+        lastRender = Date.now();
+        render();
+      },
+    };
+  },
+};
 
 W.sessions = {
   needs: ['work', 'tick'],

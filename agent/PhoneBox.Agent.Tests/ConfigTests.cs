@@ -35,6 +35,26 @@ public class ConfigTests
     }
 
     [Fact]
+    public void CodexBarTemplateExpandsIntoWidgets()
+    {
+        var c = Load("""{ "pages": [ { "template": "codexbar" } ] }""");
+        var p = c.Pages.Single();
+        Assert.Equal("codexbar", p.Id);
+        Assert.Equal("CodexBar", p.Title);
+        Assert.Contains(p.Widgets!, w => w.Type == "quotas");
+        Assert.True(c.CodexBar.ShowOverview);
+    }
+
+    [Fact]
+    public void CodexBarCustomProvidersArePreservedWhenCustomized()
+    {
+        var c = Load("""{ "codexBar": { "providers": ["codex", "alibabatokenplan"], "customized": true, "showOverview": false } }""");
+        Assert.Equal(["codex", "alibabatokenplan"], c.CodexBar.Providers);
+        Assert.False(c.CodexBar.ShowOverview);
+        Assert.Equal("Alibaba Token Plan", QuotaMonitor.DisplayNameFor("alibabatokenplan"));
+    }
+
+    [Fact]
     public void LegacyHomePageKeepsItsTilesAndOptions()
     {
         // 0.6.1: a fixed "home" page with options
