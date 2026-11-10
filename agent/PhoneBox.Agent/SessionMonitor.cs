@@ -42,9 +42,11 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log) : BackgroundServ
         }
     }
 
-    private static IEnumerable<AgentSession> ReadClaude()
+    public static IEnumerable<AgentSession> ReadClaude(string? homeDir = null, Func<int, bool>? isAlive = null)
     {
-        var dir = Path.Combine(Home, ".claude", "sessions");
+        var home = homeDir ?? Home;
+        var aliveCheck = isAlive ?? Alive;
+        var dir = Path.Combine(home, ".claude", "sessions");
         if (!Directory.Exists(dir)) yield break;
         foreach (var file in Directory.EnumerateFiles(dir, "*.json"))
         {
@@ -54,13 +56,23 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log) : BackgroundServ
                 using var doc = JsonDocument.Parse(File.ReadAllText(file));
                 var r = doc.RootElement;
                 var pid = r.TryGetProperty("pid", out var p) && p.TryGetInt32(out var pi) ? pi : 0;
-                if (pid == 0 || !Alive(pid)) continue;
+                if (pid == 0 || !aliveCheck(pid)) continue;
                 var cwd = Str(r, "cwd") ?? "";
+                var name = Str(r, "name") ?? Path.GetFileName(cwd.TrimEnd('\\', '/'));
+                var project = Path.GetFileName(cwd.TrimEnd('\\', '/'));
+
+                if (project.Contains("ClaudeProbe", StringComparison.OrdinalIgnoreCase)
+                    || cwd.Contains("ClaudeProbe", StringComparison.OrdinalIgnoreCase)
+                    || cwd.Contains("CodexBar", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 s = new AgentSession(
                     Id: "claude:" + (Str(r, "sessionId") ?? pid.ToString()),
                     Tool: "claude",
-                    Name: Str(r, "name") ?? Path.GetFileName(cwd.TrimEnd('\\', '/')),
-                    Project: Path.GetFileName(cwd.TrimEnd('\\', '/')),
+                    Name: name,
+                    Project: project,
                     Status: Str(r, "status") ?? "idle",
                     WaitingFor: Str(r, "waitingFor"),
                     Since: Long(r, "statusUpdatedAt") ?? Long(r, "updatedAt") ?? 0,

@@ -73,5 +73,46 @@ public sealed class SessionDetailsTests : IDisposable
         Assert.Equal("aborted", Assert.Single(_monitor.ReadCodex(_root)).Outcome);
     }
 
+    [Fact]
+    public void Claude_NormalSession_IsReported()
+    {
+        var claudeDir = Path.Combine(_root, ".claude", "sessions");
+        Directory.CreateDirectory(claudeDir);
+        var json = JsonSerializer.Serialize(new
+        {
+            pid = 1122,
+            sessionId = "sess-1",
+            cwd = "/Users/test/workspace/my-app",
+            status = "waiting",
+            waitingFor = "permission prompt"
+        });
+        File.WriteAllText(Path.Combine(claudeDir, "1122.json"), json);
+
+        var s = Assert.Single(SessionMonitor.ReadClaude(_root, pid => pid == 1122));
+        Assert.Equal("claude", s.Tool);
+        Assert.Equal("my-app", s.Project);
+        Assert.Equal("waiting", s.Status);
+        Assert.Equal("permission prompt", s.WaitingFor);
+        Assert.Equal(1122, s.Pid);
+    }
+
+    [Fact]
+    public void Claude_ClaudeProbeAndCodexBar_AreIgnored()
+    {
+        var claudeDir = Path.Combine(_root, ".claude", "sessions");
+        Directory.CreateDirectory(claudeDir);
+        var probeJson = JsonSerializer.Serialize(new
+        {
+            pid = 2233,
+            sessionId = "sess-probe",
+            cwd = "/Users/test/Library/Application Support/CodexBar/ClaudeProbe",
+            status = "waiting",
+            waitingFor = "dialog open"
+        });
+        File.WriteAllText(Path.Combine(claudeDir, "2233.json"), probeJson);
+
+        Assert.Empty(SessionMonitor.ReadClaude(_root, pid => pid == 2233));
+    }
+
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, true); }
 }
