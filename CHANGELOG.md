@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.1 — 2026-11-10
+
+- Fix stale Windows media cover art after switching YouTube/Chromium tracks ([#9](https://github.com/ersinkoc/phonebox/issues/9)).
+  Refresh delayed thumbnails and media-property changes, periodically recheck missed updates, and keep the artwork ID
+  stable when the image is unchanged. Clear artwork when the media session closes.
+- Recover the four affected default icons from known ANSI/UTF-8 double-encoded forms ([#10](https://github.com/ersinkoc/phonebox/issues/10)).
+  Repair only page/shortcut icon fields, preserve the original configuration in the normal backup, and escape saved
+  icon values so ANSI-based editors cannot corrupt them. Other user text and commands remain unchanged.
+
 ## 0.9.0 — 2026-11-10
 
 - Add optional global, page and widget appearance settings with Original, Rounded cards, Flat, Content only and

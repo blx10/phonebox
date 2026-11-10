@@ -7,35 +7,69 @@ public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
 {
     private GlobalSystemMediaTransportControlsSessionManager? _mgr;
     private volatile MediaSnapshot? _snap;
-    private string _trackKey = "";
-    private int _artId;
-    private int _artTries;
+    private readonly MediaArtworkCache _art = new();
+    private readonly SemaphoreSlim _pollGate = new(1, 1);
+    private GlobalSystemMediaTransportControlsSession? _observed;
+    private long _revision;
 
-    public AlbumArt? Art { get; private set; }
+    public AlbumArt? Art => _art.Current;
     public MediaSnapshot? Snapshot() => _snap;
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested)
+        try
         {
-            try
+            while (!ct.IsCancellationRequested)
             {
-                _mgr ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-                await Poll();
+                try
+                {
+                    if (_mgr is null)
+                    {
+                        _mgr = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+                        _mgr.CurrentSessionChanged += SessionChanged;
+                    }
+                    await Poll(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+                catch (Exception ex)
+                {
+                    log.LogDebug("media: {Msg}", ex.Message);
+                    _snap = null;
+                }
+                await Task.Delay(1000, ct);
             }
-            catch (Exception ex)
-            {
-                log.LogDebug("media: {Msg}", ex.Message);
-                _snap = null;
-            }
-            await Task.Delay(1000, ct);
+        }
+        finally
+        {
+            if (_mgr is not null) _mgr.CurrentSessionChanged -= SessionChanged;
+            Observe(null);
+            _art.Clear();
         }
     }
 
-    private async Task Poll()
+    private void SessionChanged(GlobalSystemMediaTransportControlsSessionManager sender, CurrentSessionChangedEventArgs args) => Interlocked.Increment(ref _revision);
+    private void PropertiesChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs args) => Interlocked.Increment(ref _revision);
+    private void Observe(GlobalSystemMediaTransportControlsSession? session)
+    {
+        if (ReferenceEquals(session, _observed)) return;
+        if (_observed is not null) _observed.MediaPropertiesChanged -= PropertiesChanged;
+        _observed = session;
+        if (_observed is not null) _observed.MediaPropertiesChanged += PropertiesChanged;
+    }
+
+    private async Task Poll(CancellationToken ct = default)
+    {
+        await _pollGate.WaitAsync(ct);
+        try { await PollCore(ct); }
+        finally { _pollGate.Release(); }
+    }
+
+    private async Task PollCore(CancellationToken ct)
     {
         var s = _mgr!.GetCurrentSession();
-        if (s is null) { _snap = null; return; }
+        Observe(s);
+        if (s is null) { _snap = null; _art.Clear(); return; }
+        var revision = Interlocked.Read(ref _revision);
 
         var props = await s.TryGetMediaPropertiesAsync();
         var pb = s.GetPlaybackInfo();
@@ -43,29 +77,20 @@ public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
         var playing = pb.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
 
         var key = $"{s.SourceAppUserModelId}|{props.Title}|{props.Artist}";
-        if (key != _trackKey)
+        // Refresh after metadata events and while a new track's thumbnail is still settling.
+        try
         {
-            _trackKey = key;
-            _artTries = 0;
-            Art = null;
-        }
-        // Spotify sometimes delivers the cover art a few seconds late; retry a few times.
-        if (Art is null && _artTries < 8 && props.Thumbnail is { } thumb)
-        {
-            _artTries++;
-            try
+            await _art.UpdateAsync(key, revision, props.Thumbnail is { } thumb ? async token =>
             {
                 using var stream = await thumb.OpenReadAsync();
+                if (stream.Size > 8 * 1024 * 1024) return null;
                 using var ms = new MemoryStream();
-                await stream.AsStreamForRead().CopyToAsync(ms);
-                if (ms.Length > 0)
-                {
-                    Art = new AlbumArt(ms.ToArray(), string.IsNullOrEmpty(stream.ContentType) ? "image/png" : stream.ContentType);
-                    _artId++;
-                }
-            }
-            catch (Exception ex) { log.LogDebug("cover art: {Msg}", ex.Message); }
+                await stream.AsStreamForRead().CopyToAsync(ms, token);
+                return ms.Length > 0 ? new AlbumArt(ms.ToArray(), string.IsNullOrEmpty(stream.ContentType) ? "image/png" : stream.ContentType) : null;
+            } : null, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { log.LogDebug("cover art: {Msg}", ex.Message); }
 
         var pos = tl.Position;
         if (playing && tl.LastUpdatedTime.Year > 2000)
@@ -82,7 +107,7 @@ public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
             Playing: playing,
             PosMs: (long)pos.TotalMilliseconds,
             DurMs: (long)Math.Max(0, dur.TotalMilliseconds),
-            ArtId: Art is null ? 0 : _artId,
+            ArtId: Art is null ? 0 : _art.Id,
             CanSeek: pb.Controls.IsPlaybackPositionEnabled);
     }
 

@@ -164,6 +164,7 @@ public sealed class PageConfig
     public AppearanceConfig? Appearance { get; set; }
     public string Id { get; set; } = "";
     public string Title { get; set; } = "";
+    [JsonConverter(typeof(IconJsonConverter))]
     public string Icon { get; set; } = "";
     public bool Enabled { get; set; } = true;
     /// <summary>Return home after this many idle seconds on this page; null = the display setting, 0 = stay.</summary>
@@ -291,6 +292,7 @@ public sealed class Shortcut
 {
     public string Id { get; set; } = "";
     public string Label { get; set; } = "";
+    [JsonConverter(typeof(IconJsonConverter))]
     public string Icon { get; set; } = "";
     public string Color { get; set; } = "#6b7280";
     /// <summary>A program, address or file; or builtin:lock / monitor-off / mute / keys / text / macro.</summary>
@@ -434,6 +436,7 @@ public sealed partial class ConfigStore(string path)
         foreach (var s in c.Shortcuts ??= [])
         {
             s.Label = s.Label?.Trim() ?? "";
+            s.Icon = IconText.Repair(s.Icon);
             var id = string.IsNullOrWhiteSpace(s.Id) ? Slug(s.Label) : Slug(s.Id);
             if (id == "") id = "shortcut";
             var unique = id;
@@ -505,6 +508,7 @@ public sealed partial class ConfigStore(string path)
             }
             if (string.IsNullOrWhiteSpace(p.Title)) p.Title = tpl?.Title ?? "Page";
             if (string.IsNullOrWhiteSpace(p.Icon)) p.Icon = tpl?.Icon ?? "▫️";
+            p.Icon = IconText.Repair(p.Icon);
             p.Title = p.Title.Trim();
             if (p.IdleSec is { } idleSec) p.IdleSec = Math.Clamp(idleSec, 0, 86400);
             var id = Slug(string.IsNullOrWhiteSpace(p.Id) ? (tpl?.Id ?? p.Title) : p.Id);
@@ -590,13 +594,16 @@ public sealed partial class ConfigStore(string path)
     public void PersistGenerated()
     {
         var c = Get();
+        var version = _stamp.Ticks;
         try
         {
             var onDisk = JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path), ReadOpts);
-            if (onDisk?.Lan?.Token == c.Lan.Token && onDisk?.Lan?.WebhookToken == c.Lan.WebhookToken) return;
+            var damagedIcons = (onDisk?.Pages ?? []).Any(p => p is not null && IconText.Repair(p.Icon) != p.Icon)
+                || (onDisk?.Shortcuts ?? []).Any(s => s is not null && IconText.Repair(s.Icon) != s.Icon);
+            if (!damagedIcons && onDisk?.Lan?.Token == c.Lan.Token && onDisk?.Lan?.WebhookToken == c.Lan.WebhookToken) return;
         }
         catch { }
-        Save(JsonSerializer.Serialize(c, WriteOpts));
+        Save(JsonSerializer.Serialize(c, WriteOpts), version);
     }
 
     private static string Slug(string s) => NonSlug().Replace(s.ToLowerInvariant()

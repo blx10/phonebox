@@ -254,6 +254,9 @@ Double-click the tray icon on Windows (or open <http://127.0.0.1:8765>):
 
 Settings live in `%APPDATA%\PhoneBox\config.json` (Linux: `~/.config/PhoneBox`, macOS: `~/Library/Application Support/PhoneBox`);
 the phone picks up changes within a few seconds.
+Use UTF-8 when editing this file externally. Saved page and shortcut icons use JSON Unicode escapes to survive
+ANSI-based editors; the settings editor displays the actual symbols. On startup, known double-encoded forms of
+the four affected default icons are repaired, with the original file kept in `config.json.bak`.
 
 ## Claude Code permission prompts
 

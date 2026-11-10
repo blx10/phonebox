@@ -36,16 +36,16 @@
   // Shortcut keys. The phone only sends the "id"; commands live in this file only.
   // cmd: a program, a URL, or builtin:lock | builtin:monitor-off | builtin:mute
   "shortcuts": [
-    { "id": "terminal", "label": "Terminal", "icon": "⌨️", "color": "#4b5563", "cmd": "open", "args": "-a Terminal" },
-    { "id": "files", "label": "Finder", "icon": "📁", "color": "#e5b84b", "cmd": "open", "args": "~" },
-    { "id": "vscode", "label": "VS Code", "icon": "📝", "color": "#2f80ed", "cmd": "open", "args": "-a \"Visual Studio Code\"" },
-    { "id": "browser", "label": "Browser", "icon": "🌐", "color": "#0ea5e9", "cmd": "https://github.com" },
-    { "id": "spotify", "label": "Spotify", "icon": "🎧", "color": "#1db954", "cmd": "open", "args": "-a Spotify" },
-    { "id": "calc", "label": "Calculator", "icon": "🧮", "color": "#64748b", "cmd": "open", "args": "-a Calculator" },
-    { "id": "settings", "label": "Settings", "icon": "⚙️", "color": "#94a3b8", "cmd": "open", "args": "-a \"System Settings\"" },
-    { "id": "monitor", "label": "Activity Monitor", "icon": "📊", "color": "#22c55e", "cmd": "open", "args": "-a \"Activity Monitor\"" },
-    { "id": "mute", "label": "Mute", "icon": "🔇", "color": "#f59e0b", "cmd": "builtin:mute" },
-    { "id": "monitoroff", "label": "Screen Off", "icon": "🌙", "color": "#6366f1", "cmd": "builtin:monitor-off" },
-    { "id": "lock", "label": "Lock", "icon": "🔒", "color": "#ef4444", "cmd": "builtin:lock" }
+    { "id": "terminal", "label": "Terminal", "icon": "\u2328\ufe0f", "color": "#4b5563", "cmd": "open", "args": "-a Terminal" },
+    { "id": "files", "label": "Finder", "icon": "\ud83d\udcc1", "color": "#e5b84b", "cmd": "open", "args": "~" },
+    { "id": "vscode", "label": "VS Code", "icon": "\ud83d\udcdd", "color": "#2f80ed", "cmd": "open", "args": "-a \"Visual Studio Code\"" },
+    { "id": "browser", "label": "Browser", "icon": "\ud83c\udf10", "color": "#0ea5e9", "cmd": "https://github.com" },
+    { "id": "spotify", "label": "Spotify", "icon": "\ud83c\udfa7", "color": "#1db954", "cmd": "open", "args": "-a Spotify" },
+    { "id": "calc", "label": "Calculator", "icon": "\ud83e\uddee", "color": "#64748b", "cmd": "open", "args": "-a Calculator" },
+    { "id": "settings", "label": "Settings", "icon": "\u2699\ufe0f", "color": "#94a3b8", "cmd": "open", "args": "-a \"System Settings\"" },
+    { "id": "monitor", "label": "Activity Monitor", "icon": "\ud83d\udcca", "color": "#22c55e", "cmd": "open", "args": "-a \"Activity Monitor\"" },
+    { "id": "mute", "label": "Mute", "icon": "\ud83d\udd07", "color": "#f59e0b", "cmd": "builtin:mute" },
+    { "id": "monitoroff", "label": "Screen Off", "icon": "\ud83c\udf19", "color": "#6366f1", "cmd": "builtin:monitor-off" },
+    { "id": "lock", "label": "Lock", "icon": "\ud83d\udd12", "color": "#ef4444", "cmd": "builtin:lock" }
   ]
 }
