@@ -20,6 +20,7 @@ public sealed class ObsTests : IDisposable
     private readonly List<string> _requests = [];
     private bool _recording;
     private string _scene = "Desk";
+    private TaskCompletionSource? _inputsReady;
 
     public ObsTests()
     {
@@ -67,6 +68,7 @@ public sealed class ObsTests : IDisposable
                 if (m is null) break;
                 var d = m["d"]!;
                 var type = d["requestType"]!.GetValue<string>();
+                if (type == "GetInputList" && _inputsReady is { } ready) await ready.Task;
                 lock (_requests) _requests.Add(type + (d["requestData"]?["sceneName"] is { } sn ? ":" + sn.GetValue<string>() : ""));
                 object data = type switch
                 {
@@ -145,7 +147,7 @@ public sealed class ObsTests : IDisposable
         try
         {
             await Until(()=>obs.Snapshot().Connected);
-            var state=await obs.DeckSnapshot(default);
+            var state=await UntilDeck(obs);
             Assert.Equal(65,state["inputs"]![0]!["volume"]!.GetValue<double>());
             Assert.True(state["replayActive"]!.GetValue<bool>());
             Assert.False((await obs.DeckAct("volume","unknown",50,null,default)).Ok);
@@ -165,6 +167,36 @@ public sealed class ObsTests : IDisposable
             }
         }
         finally { await obs.StopAsync(default); }
+    }
+
+    private static async Task<JsonObject> UntilDeck(ObsMonitor obs)
+    {
+        for(var i=0;i<30;i++)
+        {
+            var state=await obs.DeckSnapshot(default);
+            if(state["connected"]?.GetValue<bool>()==true && state["inputs"] is JsonArray)return state;
+            await Task.Delay(100);
+        }
+        throw new TimeoutException("OBS discovery did not complete");
+    }
+
+    [Fact]
+    public async Task SlowObsDiscoveryReturnsLoadingThenTheMeasuredControls()
+    {
+        _inputsReady=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var obs=Monitor(Password);await obs.StartAsync(default);
+        try
+        {
+            await Until(()=>obs.Snapshot().Connected);
+            var loading=await obs.DeckSnapshot(default);
+            Assert.True(loading["loading"]!.GetValue<bool>());
+            Assert.False(loading["connected"]!.GetValue<bool>());
+            _inputsReady.SetResult();
+            var state=await UntilDeck(obs);
+            Assert.Equal("Mic/Aux",state["inputs"]![0]!["id"]!.GetValue<string>());
+            Assert.Equal(65,state["inputs"]![0]!["volume"]!.GetValue<double>());
+        }
+        finally { _inputsReady.TrySetResult();await obs.StopAsync(default); }
     }
 
     [Fact]
