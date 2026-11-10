@@ -287,7 +287,36 @@ public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
         bool ok;
         if (OperatingSystem.IsMacOS())
         {
-            if (_macSystemMedia)
+            if (action == "pause")
+            {
+                var paused = _macSystemMedia && Sh.Run("nowplaying-cli", "pause") is not null;
+                var scripted = Sh.Run("osascript", "-e", """
+                    set didPause to false
+                    if application "Spotify" is running then
+                      try
+                        tell application "Spotify"
+                          if player state is playing then
+                            pause
+                            set didPause to true
+                          end if
+                        end tell
+                      end try
+                    end if
+                    if application "Music" is running then
+                      try
+                        tell application "Music"
+                          if player state is playing then
+                            pause
+                            set didPause to true
+                          end if
+                        end tell
+                      end try
+                    end if
+                    return didPause as string
+                    """)?.Trim() == "true";
+                ok = paused || scripted;
+            }
+            else if (_macSystemMedia)
             {
                 string[]? args = action switch
                 {
@@ -317,6 +346,7 @@ public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
         {
             string[]? args = action switch
             {
+                "pause" => ["--all-players", "pause"],
                 "playpause" => ["play-pause"],
                 "next" => ["next"],
                 "prev" => ["previous"],

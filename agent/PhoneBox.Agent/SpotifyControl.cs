@@ -192,6 +192,16 @@ public sealed class SpotifyControl : IDisposable
         catch (Exception ex) when (ex is IOException or HttpRequestException or JsonException)
         { return new(false, ex is IOException ? ex.Message : "Spotify is unavailable"); }
     }
+    public async Task PauseIfActiveAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            if (await Access(false, ct) is null) return;
+            await Request(HttpMethod.Put, "me/player/pause" + DeviceQuery(), null, ct);
+            _readAt = 0;
+        }
+        catch { }
+    }
     private string DeviceQuery() => _config.Get().Controls.SpotifyDevice is { Length: > 0 } id ? "?device_id=" + Uri.EscapeDataString(id) : "";
     public void Dispose() { _http.Dispose(); _tokenGate.Dispose(); _readGate.Dispose(); }
 }

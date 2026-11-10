@@ -25,6 +25,9 @@ public sealed partial class ControlDeck : BackgroundService
     private readonly Dictionary<string, (int Original, int Applied)> _duck = [];
     private int? _duckPercent;
     private readonly Dictionary<string, long> _sleep = [];
+    private readonly HashSet<string> _activeRadios = [];
+    private bool _externalMediaPlaying;
+    private long _mediaWatchAt;
     private Task? _hardwareJob;
     private long _hardwareAt;
     private IReadOnlyList<DeckMonitor> _monitors = [];
@@ -130,7 +133,12 @@ public sealed partial class ControlDeck : BackgroundService
                 case "default":
                     if (op is not ("" or "all" or "media" or "communications" or "console")) return new(false, "Unknown audio role");
                     ok = _native.DefaultDevice(id, op switch { "media" => 1, "communications" => 2, "console" => 0, _ => null }); break;
-                case "media": ok = await _native.MediaAction(id, op, value ?? 0, ct); break;
+                case "media":
+                    var wasPlayingMedia = (await SafeMedia(ct)).Any(p => p.Id == id && p.Playing);
+                    ok = await _native.MediaAction(id, op, value ?? 0, ct);
+                    if (ok && (op is "play" or "next" or "prev" || (op == "playpause" && !wasPlayingMedia)))
+                        StopAllRadios();
+                    break;
                 case "ptt":
                     if (op == "begin") { var token = _ptt.Begin(id); return new(token is not null, token is null ? "Microphone is unavailable" : null, token); }
                     ok = lease is not null && (op == "renew" ? _ptt.Renew(lease) : op == "end" && _ptt.End(lease)); break;
@@ -147,7 +155,10 @@ public sealed partial class ControlDeck : BackgroundService
                     ok = true;
                     foreach (var d in Audio().Devices) ok &= _native.Device(d.Id, null, true);
                     break;
-                case "sound-stop": _native.StopSound(string.IsNullOrEmpty(id) ? null : id); ok = true; break;
+                case "sound-stop":
+                    if (string.IsNullOrEmpty(id)) { StopAllRadios(); _native.StopSound(null); }
+                    else { StopRadio(id); }
+                    ok = true; break;
                 case "action": return await Action(id, op, value, ct);
                 case "brightness": ok = value is >= 0 and <= 100 && _native.Brightness(id, value.Value); break;
                 case "desktop": ok = value is -1 or 1 && await _native.PlatformAction("desktop", "", null, value.Value, ct); break;
@@ -225,17 +236,29 @@ public sealed partial class ControlDeck : BackgroundService
                 return await ShortcutAction(c, action.Target, op, ct);
             case "keys": KeySender.SendKeys(action.Target); return new(true);
             case "text": KeySender.TypeText(action.Target); return new(true);
-            case "sound": case "radio":
+            case "sound":
                 if (op == "stop") _native.StopSound(action.Id);
                 else _native.Play(action.Id, action.Target, action.Device, Math.Clamp(action.Value, 0, 100));
                 return new(true);
+            case "radio":
+                if (op == "stop")
+                {
+                    StopRadio(action.Id);
+                    return new(true);
+                }
+                var started = await StartRadioAsync(action, ct);
+                return new(started, started ? null : "Radio stream could not be opened");
             case "midi":
                 if (!int.TryParse(action.Device, out var port)) return new(false, "Choose a MIDI output port");
                 _native.Midi(port, action.Target, value ?? action.Value); return new(true);
             case "osc":
                 await SendOsc(action.Device ?? "", action.Target, value ?? action.Value, ct); return new(true);
             case "workflow": return await Workflow(action, ct);
-            case "playlist": return _spotify is null ? new(false, "Spotify is unavailable") : await _spotify.Act("playlist", action.Id, ct);
+            case "playlist":
+                if (_spotify is null) return new(false, "Spotify is unavailable");
+                var playlistResult = await _spotify.Act("playlist", action.Id, ct);
+                if (playlistResult.Ok) StopAllRadios();
+                return playlistResult;
             case "audio-route": return await RouteAudio(action, ct);
             case "mixer": case "mixer-mute": return MixerAction(action, value);
             default:
@@ -318,9 +341,118 @@ public sealed partial class ControlDeck : BackgroundService
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         finally { _ptt.Sweep(all: true); RestoreDucking(); lock (_state) foreach (var player in _fades.Keys.ToArray()) RestoreFade(player); await _tasks.StopAsync(); DisposeMixer(); _native.Dispose(); }
     }
+    public void StopAllRadios(string? exceptId = null)
+    {
+        string[] tracked;
+        lock (_state)
+        {
+            tracked = _activeRadios.Where(id => id != exceptId).ToArray();
+            if (exceptId is null) _activeRadios.Clear();
+            else _activeRadios.RemoveWhere(id => id != exceptId);
+        }
+        var ids = _config.Get().Controls.Actions
+            .Where(a => a.Kind == "radio" && a.Id != exceptId)
+            .Select(a => a.Id)
+            .Concat(tracked)
+            .Distinct(StringComparer.Ordinal);
+        foreach (var radioId in ids)
+            _native.StopSound(radioId);
+        Invalidate();
+    }
+
+    private void StopRadio(string id)
+    {
+        lock (_state) _activeRadios.Remove(id);
+        _native.StopSound(id);
+        Invalidate();
+    }
+
+    private async Task<bool> StartRadioAsync(DeckAction action, CancellationToken ct)
+    {
+        StopAllRadios(action.Id);
+        await PauseAllMediaAsync(ct);
+        var stillPlaying = (await SafeMedia(ct)).Any(IsExternalMediaSession);
+        _native.Play(action.Id, action.Target, action.Device, Math.Clamp(action.Value, 0, 100));
+        var now = _now();
+        lock (_state)
+        {
+            _activeRadios.Add(action.Id);
+            _externalMediaPlaying = stillPlaying;
+            _mediaWatchAt = now;
+        }
+        Invalidate();
+        return IsRadioPlaying(action);
+    }
+
+    internal bool IsRadioPlaying(DeckAction action)
+    {
+        var nativeState = _native.ActionState(action);
+        if (nativeState is not null)
+        {
+            var playing = nativeState == "Playing";
+            if (!playing) { lock (_state) _activeRadios.Remove(action.Id); }
+            return playing;
+        }
+        lock (_state) return _activeRadios.Contains(action.Id);
+    }
+
+    private async Task<IReadOnlyList<DeckMedia>> SafeMedia(CancellationToken ct)
+    {
+        try { return await _native.Media(ct); }
+        catch { return []; }
+    }
+
+    private static bool IsExternalMediaSession(DeckMedia m) =>
+        m.Playing
+        && !m.Name.Equals("ffplay", StringComparison.OrdinalIgnoreCase)
+        && !m.Name.Equals("mpv", StringComparison.OrdinalIgnoreCase)
+        && !m.Name.Equals("PhoneBoxAgent", StringComparison.OrdinalIgnoreCase);
+
+    private async Task PauseAllMediaAsync(CancellationToken ct)
+    {
+        var sessions = await SafeMedia(ct);
+        var pausedSpecific = false;
+        foreach (var session in sessions.Where(IsExternalMediaSession))
+        {
+            pausedSpecific = true;
+            try { await _native.MediaAction(session.Id, "pause", 0, ct); } catch { }
+        }
+        if (!pausedSpecific && !OperatingSystem.IsWindows())
+        {
+            try { await _native.MediaAction("current", "pause", 0, ct); } catch { }
+        }
+        if (_spotify is not null)
+            _ = _spotify.PauseIfActiveAsync(CancellationToken.None);
+    }
+
+    internal async Task TickRadioMediaFocus(CancellationToken ct)
+    {
+        var radios = _config.Get().Controls.Actions.Where(a => a.Kind == "radio").ToArray();
+        if (!radios.Any(IsRadioPlaying))
+        {
+            _externalMediaPlaying = false;
+            return;
+        }
+        var sessions = await SafeMedia(ct);
+        var anyPlaying = sessions.Any(IsExternalMediaSession);
+        if (anyPlaying && !_externalMediaPlaying)
+        {
+            _externalMediaPlaying = true;
+            StopAllRadios();
+            return;
+        }
+        _externalMediaPlaying = anyPlaying;
+    }
+
     private async Task Tick(CancellationToken ct)
     {
         await TickSleep(ct);
+        var now = _now();
+        if (now - _mediaWatchAt >= 750)
+        {
+            _mediaWatchAt = now;
+            await TickRadioMediaFocus(ct);
+        }
         lock (_state)
         {
             if (_duckPercent is null) { RestoreDucking(); return; }
