@@ -24,7 +24,7 @@ This document tracks implementation and evidence; a catalog entry or demo is not
 - Both .NET targets compile with zero warnings and zero errors; the full .NET suite passes 245 tests. An earlier
   concurrent build run hit the existing PowerShell child-startup timeout test; its isolated rerun and the final full
   suite passed. The test was not skipped or weakened. OBS tests also cover the explicit loading response during slow discovery and wait for the measured controls before asserting their contents.
-- HTTP fixtures serialize port allocation/start and use distinct ports; a sixteen-listener contention test covers parallel startup. Owned-process fixture cleanup waits for bounded Windows descendant handle teardown.
+- HTTP fixtures serialize port allocation/start and use distinct ports; a sixteen-listener contention test covers parallel startup. Fixtures close their listener once: calling Stop followed by Close can rebind an already removed endpoint in the Unix HttpListener implementation. Owned-process fixture cleanup waits for bounded Windows descendant handle teardown.
 - All 40 Playwright tests pass, including application fader isolation, output selection, PTT release, disabled
   unsupported controls, OBS mute, Spotify queue, persistent meeting timers, private settings/public-config separation,
   catalog construction and 780px/360px layouts. Screenshots were inspected for both orientations.

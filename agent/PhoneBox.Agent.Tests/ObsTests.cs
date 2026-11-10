@@ -206,7 +206,7 @@ public sealed class ObsTests : IDisposable
 
     public void Dispose()
     {
-        _server.Stop();
+        // Close performs the stop as well; avoid a second endpoint removal/rebind on Unix.
         _server.Close();
         try { File.Delete(_configPath); } catch { }
     }

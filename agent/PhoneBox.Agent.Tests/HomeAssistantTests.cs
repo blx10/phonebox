@@ -115,7 +115,7 @@ public sealed class HomeAssistantTests : IDisposable
 
     public void Dispose()
     {
-        _server.Stop();
+        // On Unix, Stop followed by Close can make HttpListener rebind an already removed endpoint during cleanup.
         _server.Close();
         try { File.Delete(_configPath); } catch { }
     }
