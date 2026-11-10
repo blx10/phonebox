@@ -379,6 +379,7 @@ dd { margin: 0; word-break: break-all; }
 
     <section id="general">
       <h2>General</h2>
+      <div class="card" id="controlSettings"></div>
       <p class="lead">Weather, night mode, display behaviour and the phone connection.</p>
 
       <div class="card">
@@ -1274,6 +1275,25 @@ function optionField(w, o, onValChange) {
         if (!next.length) { e.target.checked = true; toast('Keep at least one', true); }
       } }), l))));
     }
+    case 'control-target': {
+      let selected = v;
+      const select = h('select', { onchange: e => { selected=e.target.value; set(o.key, selected); } }, h('option', { value: '' }, '(automatic / all)'));
+      const load = async () => {
+        try {
+          const response = await fetch('/api/controls/state');
+          if (!response.ok) return;
+          const data = await response.json();
+          let items = o.group === 'application' ? [...new Set((data.audio?.sessions || []).map(s => s.name))].map(name => ({ id: name, name }))
+            : o.group === 'media' ? data.media || [] : o.group === 'monitor' ? data.monitors || []
+            : (data.audio?.devices || []).filter(d => !o.group || d.direction === o.group);
+          select.replaceChildren(h('option', { value: '' }, '(automatic / all)'),
+            ...items.map(item => h('option', { value: item.id, selected: item.id === selected }, item.name)));
+          if (selected && !items.some(item => item.id === selected)) select.append(h('option', { value: selected, selected: true }, 'Unavailable: ' + selected));
+        } catch (_) { }
+      };
+      load();
+      return field(h('div', { class: 'row', style: { gap: '8px' } }, select, h('button', { class: 'btn sm', onclick: load }, 'Refresh')));
+    }
     case 'number':
       return field(h('input', { type: 'number', min: o.min, max: o.max, value: v ?? '', style: { maxWidth: '140px' }, onchange: (e) => set(o.key, e.target.value === '' ? o.default : Number(e.target.value)) }));
     case 'textarea':
@@ -1836,7 +1856,66 @@ async function testKey() {
 }
 
 // ---------------------------------------------------------------- general
+function renderControlSettings() {
+  const root = $('controlSettings');
+  const c = cfg.controls ??= { actions: [], profiles: [] }; c.actions ??= []; c.profiles ??= [];
+  const field = (label, obj, key, type = 'text') => {
+    const input = h('input', {type, value:obj[key] ?? '', 'aria-label':label});
+    if (type === 'checkbox') input.checked = !!obj[key];
+    input.onchange = () => { obj[key] = type === 'checkbox' ? input.checked : type === 'number' ? Number(input.value) : input.value; changed(); };
+    return h('div', {class:'field'},h('label',{},label),input);
+  };
+  const request = async (path, method='POST') => {
+    const r = await fetch('/api/controls/'+path,{method}); const j = await r.json().catch(()=>({}));
+    if (!r.ok || j.ok === false) throw new Error(j.error || 'Control request failed'); return j;
+  };
+  const btn = (text, fn) => h('button',{class:'btn',type:'button',onclick:async e=>{
+    const b=e.currentTarget;b.disabled=true;try{await fn();}catch(error){toast(error.message,true);}finally{b.disabled=false;}
+  }},text);
+  root.replaceChildren(h('h3',{},'Control Deck'),h('p',{class:'hint'},'Define bindings here, then add widgets to a page. Save applies changes. Executable paths and credentials stay on this computer.'));
+  root.append(field('Allow PC audio listening',c,'allowListening','checkbox'),field('Enable hold-to-confirm power controls',c,'allowPower','checkbox'));
+  const spotify=h('details',{},h('summary',{},'Spotify connection'));
+  const auth=h('p',{class:'hint'},'Register the redirect address in your Spotify Developer app. A Client ID is sufficient; no client secret is used.');
+  spotify.append(field('Spotify Client ID',c,'spotifyClientId'),field('Spotify device ID (optional)',c,'spotifyDevice'),auth,
+    btn('Connect Spotify',async()=>{
+      if(!await save())return; const j=await request('spotify/connect','GET');
+      const live=$('controlSettings');const result=h('p',{},'Register redirect address: '+j.redirectUri,h('br'),h('a',{href:j.url,target:'_blank',rel:'noopener'},'Continue to Spotify sign-in'));live.prepend(result);
+    }),btn('Check Spotify connection',async()=>{const j=await request('spotify/state','GET');auth.textContent=j.connected?'Connected':j.error || 'Not connected';}),
+    btn('Disconnect Spotify',async()=>{await request('spotify/disconnect');auth.textContent='Disconnected';}));
+  root.append(spotify);
+  const integration=h('details',{},h('summary',{},'Optional audio integrations'),field('SoundVolumeView executable path',c,'mixerExecutable'),field('Installed Voicemeeter Remote DLL path (64-bit)',c,'mixerLibrary'));root.append(integration);
+  const hints={shortcut:'Target: existing shortcut ID.',app:'Target: application shortcut ID.',macro:'Target: macro shortcut ID.',snippet:'Target: text shortcut ID.',meeting:'Target: meeting shortcut ID.',discord:'Target: Discord shortcut ID.',focus:'Target: work/focus macro shortcut ID.',project:'Target: folder/project shortcut ID.',keys:'Target: chord, e.g. Ctrl+Shift+M.',text:'Target: text to type.',task:'Target: executable shortcut ID. Output remains on the computer.',server:'Target: executable shortcut ID. Stop affects only the process started by this control.',sound:'Target: full sound file path. Device: output ID. Value: volume 0–100.',radio:'Target: direct HTTP(S) stream URL. Device: output ID. Value: volume 0–100.',playlist:'Target: spotify:playlist:… (also album, track or episode).',midi:'Target: hex MIDI bytes, e.g. B0 07 {value}. Device: numeric output port. Value: 0–127.',osc:'Target: OSC address, e.g. /volume. Device: host:port. Value: numeric float.',service:'Target: Windows service name. Argument: start, stop, restart.',workflow:'Target: owner/repo. Argument: workflow filename. Device: optional branch/ref.','window-layout':'Target: process name. Argument: left, right, center, max.','display-profile':'Target: monitor ID. Argument: JSON with width, height, hz, optional x/y.','audio-route':'Target: process.exe. Device: output ID. Requires SoundVolumeView.',mixer:'Target: Strip[0].Gain or Bus[0].Gain. Value: −60 to 12 dB.','mixer-mute':'Target: Strip[0].Mute (or supported toggle). Value: 0 or 1.',presentation:'Target: POWERPNT or soffice. Argument: start, next, prev, end, blank.'};
+  const actions=h('div');root.append(h('h4',{},'Control bindings'),actions);
+  const renderActions=()=>actions.replaceChildren(...c.actions.map(a=>{
+    const box=h('details',{},h('summary',{},a.label || a.id));
+    const kind=h('select',{'aria-label':'Control kind'},...Object.keys(hints).map(k=>h('option',{value:k,selected:a.kind===k},k)));
+    const hint=h('p',{class:'hint'},hints[a.kind] || 'Select a kind.');kind.onchange=()=>{a.kind=kind.value;hint.textContent=hints[a.kind];changed();};
+    box.append(field('Control ID',a,'id'),field('Control label',a,'label'),h('label',{},'Kind'),kind,hint,field('Target',a,'target'),field('Argument',a,'argument'),field('Device / port / branch',a,'device'),field('Value',a,'value','number'));
+    const output=h('pre',{style:{maxHeight:'240px',overflow:'auto',whiteSpace:'pre-wrap'}});
+    box.append(btn('Show task output',async()=>{const r=await fetch('/api/controls/task-output/'+encodeURIComponent(a.id));if(!r.ok)throw new Error('Output unavailable');output.textContent=await r.text();}),btn('Remove control',()=>{c.actions=c.actions.filter(x=>x!==a);changed();renderActions();}),output);return box;
+  }));renderActions();
+  root.append(btn('Add control',()=>{c.actions.push({id:'control-'+crypto.randomUUID().slice(0,8),label:'New control',kind:'shortcut',target:'',value:75});changed();renderActions();actions.lastChild.open=true;}));
+  root.append(h('details',{},h('summary',{},'Available shortcut IDs'),h('p',{class:'hint'},'Create executable, text and macro shortcuts in Deck first.'),...cfg.shortcuts.map(s=>h('div',{},s.id+' — '+s.label))));
+  const profiles=h('div');root.append(h('h4',{},'Audio and routine profiles'),profiles);
+  const renderProfiles=()=>profiles.replaceChildren(...c.profiles.map(p=>{
+    const box=h('details',{},h('summary',{},p.label || p.id));
+    box.append(field('Profile ID',p,'id'),field('Profile label',p,'label'),field('Override output device ID',p,'output'),field('Override microphone device ID',p,'input'));
+    const levels=h('details',{},h('summary',{},'Captured audio levels'));
+    for(const level of p.levels || []) levels.append(h('p',{class:'hint'},level.kind+': '+level.id),field('Volume',level,'volume','number'),field('Muted',level,'muted','checkbox'));
+    box.append(levels);
+    const list=h('textarea',{'aria-label':'Profile action IDs',rows:3},(p.actions || []).join('\n'));
+    list.onchange=()=>{p.actions=list.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);changed();};
+    box.append(h('label',{},'Control IDs to run in order'),list,h('p',{class:'hint'},(p.levels?.length || 0)+' captured levels. Explicit input/output overrides take precedence over captured audio roles.'),btn('Remove profile',()=>{c.profiles=c.profiles.filter(x=>x!==p);changed();renderProfiles();}));return box;
+  }));renderProfiles();
+  root.append(btn('Capture current audio profile',async()=>{c.profiles.push(await request('capture'));changed();renderProfiles();profiles.lastChild.open=true;}),btn('Add routine profile',()=>{c.profiles.push({id:'profile-'+crypto.randomUUID().slice(0,8),label:'New routine',levels:[],defaults:{},actions:[]});changed();renderProfiles();profiles.lastChild.open=true;}));
+  const hardware=h('pre',{style:{maxHeight:'240px',overflow:'auto',whiteSpace:'pre-wrap'}});
+  root.append(btn('List device, monitor and MIDI IDs',async()=>{
+    const d=await request('state','GET');hardware.textContent=[...(d.audio?.devices || []).map(i=>i.direction+': '+i.name+'\n'+i.id),...(d.monitors || []).map(i=>'Monitor: '+i.name+'\n'+i.id),...(d.midi || []).map(i=>'MIDI: '+i.name+'\n'+i.id)].join('\n\n');if(d.hardwareLoading)hardware.textContent+='\nHardware discovery is running; refresh shortly.';
+  }),hardware);
+}
+
 function bindForm() {
+  renderControlSettings();
   document.querySelectorAll('[data-bind]').forEach((el) => {
     const p = el.dataset.bind, type = el.dataset.type;
     const v = getPath(cfg, p);
@@ -1950,9 +2029,10 @@ async function save() {
   if (cfgVersion) headers['X-Config-Version'] = cfgVersion;
   const r = await fetch('/api/settings', { method: 'PUT', headers, body: JSON.stringify(cfg) });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(j.error || 'Could not save', true); return; }
+  if (!r.ok) { toast(j.error || 'Could not save', true); return false; }
   await load();
   toast('Saved — the phone updates within a few seconds');
+  return true;
 }
 
 $('save').onclick = save;

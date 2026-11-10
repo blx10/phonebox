@@ -245,9 +245,94 @@
   const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
   const parse = (body) => { if (body == null || body === '') return null; try { return JSON.parse(body); } catch (_) { return String(body); } };
 
+  // Control Deck preview data only. Native integrations live in the desktop agent.
+  const deck = {
+    platform: 'demo', allowPower: false, allowListening: false, ducking: false, sleep: [],
+    audio: { available: true, error: null, defaults:{'output:0':'speaker','output:1':'speaker','output:2':'speaker','input:0':'mic','input:1':'mic','input:2':'mic'}, devices: [
+      { id: 'speaker', name: 'Desk speakers', direction: 'output', default: true, volume: 42, muted: false, peak: .45, channels: 2, channelVolumes:[42,42] },
+      { id: 'headphones', name: 'Headphones', direction: 'output', default: false, volume: 60, muted: false, peak: .2, channels: 2, channelVolumes:[60,60] },
+      { id: 'mic', name: 'Desk microphone', direction: 'input', default: true, volume: 75, muted: true, peak: .15, channels: 1 },
+    ], sessions: [
+      { id: 'spotify', name: 'Spotify', pid: 101, deviceId: 'speaker', volume: 65, muted: false, peak: .55 },
+      { id: 'browser', name: 'Browser', pid: 102, deviceId: 'speaker', volume: 30, muted: false, peak: .25 },
+    ] },
+    media: [
+      { id: 'spotify', name: 'Spotify', title: 'Midnight Circuit', playing: true, position: 61000, duration: 214000, canSeek: true, canShuffle: true, canRepeat: true, shuffle: false, repeat: 'None' },
+      { id: 'browser', name: 'Browser', title: 'Engineering session', playing: false, position: 10000, duration: 600000, canSeek: true, canShuffle: false, canRepeat: false, shuffle: false, repeat: 'None' },
+    ],
+    actions: [{ id: 'demo-macro', name: 'Start work', kind: 'macro', state: 'Ready' }, { id: 'demo-sound', name: 'Chime', kind: 'sound', state: 'Ready' }],
+    shortcuts: [], profiles: [{ id: 'meeting', name: 'Meeting', kind: 'profile' }],
+    monitors: [{ id: 'display', name: 'Desk display', brightness: 60, width: 1920, height: 1080, hz: 60 }],
+    powerPlans: [{ id: 'balanced', name: 'Balanced', state: 'Active' }], midi: [],
+  };
+  const deckLeases = new Map();
+  const deckObs = {connected:true,scene:'Desktop',scenes:['Desktop','Camera'],inputs:[{id:'Desktop Audio',name:'Desktop Audio',volume:70,muted:false}],sources:[{id:1,name:'Webcam',enabled:true}],recording:false,streaming:false,recordPaused:false,recordMs:0,streamMs:0,transitions:[{transitionName:'Fade'},{transitionName:'Cut'}],transition:'Fade',duration:300,replayAvailable:true,replayActive:false,cameraAvailable:true,cameraActive:false};
+  const deckSpotify = {connected:true,playing:true,current:{id:'spotify:track:1234567890123456789012',name:'Midnight Circuit',artist:'Demo artist'},queue:[{id:'spotify:track:abcdefghijklmnopqrstuv',name:'Next track',artist:'Demo artist'}]};
+  function controlCommand(kind, q) {
+    const id = q.get('id'), op = q.get('op'), value = q.has('value') ? +q.get('value') : null;
+    if (kind === 'device' || kind === 'session') {
+      const item = (kind === 'device' ? deck.audio.devices : deck.audio.sessions).find(x => x.id === id);
+      if (!item) return { ok: false, error: 'Device unavailable' };
+      if (value != null) {
+        if(kind==='device' && (op==='left'||op==='right'))item.channelVolumes[op==='left'?0:1]=value;
+        else item.volume = Math.max(0, Math.min(100, value));
+      }
+      if (q.has('muted')) item.muted = q.get('muted') === 'true';
+    } else if (kind === 'default') {
+      const item = deck.audio.devices.find(d => d.id === id); if (!item) return { ok: false, error: 'Device unavailable' };
+      const roles=op==='media'?[1]:op==='communications'?[2]:op==='console'?[0]:[0,1,2];
+      for(const role of roles)deck.audio.defaults[item.direction+':'+role]=id;
+      if(roles.includes(1))deck.audio.devices.filter(d => d.direction === item.direction).forEach(d => d.default = d.id === id);
+    } else if (kind === 'media') {
+      const item = deck.media.find(m => m.id === id); if (!item) return { ok: false, error: 'Player unavailable' };
+      if (op === 'playpause') item.playing = !item.playing;
+      if (op === 'seek') item.position = value;
+      if (op === 'shuffle') item.shuffle = !!value;
+      if (op === 'repeat') item.repeat = ['None', 'Track', 'List'][value];
+    } else if (kind === 'ptt') {
+      if (op === 'begin') {
+        const mic = deck.audio.devices.find(d => d.id === id && d.direction === 'input'); if (!mic) return { ok: false, error: 'No microphone' };
+        const lease = 'demo-' + Math.random(); deckLeases.set(lease, { mic, muted: mic.muted }); mic.muted = false;
+        return { ok: true, lease };
+      }
+      const lease = deckLeases.get(q.get('lease')); if (!lease) return { ok: false, error: 'Expired lease' };
+      if (op === 'end') { lease.mic.muted = lease.muted; deckLeases.delete(q.get('lease')); }
+    } else if (kind === 'duck') deck.ducking = op !== 'off';
+    else if (kind === 'brightness') deck.monitors[0].brightness = value;
+    else if (kind === 'panic') deck.audio.devices.forEach(d => d.muted = true);
+    else if (kind === 'sleep') deck.sleep = value ? [{ id, at: now() + value * 60000 }] : [];
+    else if (kind === 'power-arm' || kind === 'power') return { ok: false, error: 'Power actions are disabled in the demo' };
+    return { ok: true };
+  }
+
   async function handle(method, path, q, body) {
+    if (path === '/api/controls/obs') return json(deckObs);
+    if (path.startsWith('/api/controls/obs/') && method === 'POST') {
+      const action=path.split('/').pop(),id=q.get('id'),value=+q.get('value'),enabled=q.get('enabled')==='true';
+      if(action==='volume'||action==='mute'){const item=deckObs.inputs.find(i=>i.id===id);if(!item)return json({ok:false,error:'Missing input'});if(action==='volume')item.volume=value;else item.muted=enabled;}
+      else if(action==='scene')deckObs.scene=id;
+      else if(action==='source')deckObs.sources.find(i=>String(i.id)===id).enabled=enabled;
+      else if(action==='transition')deckObs.transition=id;
+      else if(action==='duration')deckObs.duration=value;
+      else if(action==='record')deckObs.recording=!deckObs.recording;
+      else if(action==='pause')deckObs.recordPaused=!deckObs.recordPaused;
+      else if(action==='stream')deckObs.streaming=!deckObs.streaming;
+      else if(action==='replay')deckObs.replayActive=!deckObs.replayActive;
+      else if(action==='camera')deckObs.cameraActive=!deckObs.cameraActive;
+      return json({ok:true});
+    }
+    if(path==='/api/controls/spotify/state')return json(deckSpotify);
+    if(path.startsWith('/api/controls/spotify/action/')&&method==='POST'){
+      if(path.endsWith('/play-queued')){const item=deckSpotify.queue.find(i=>i.id===q.get('id'));if(!item)return json({ok:false,error:'Missing queue item'});deckSpotify.current=item;}
+      return json({ok:true});
+    }
+    if(path==='/api/controls/spotify/connect')return json({error:'Spotify sign-in is available in the installed computer agent only'},400);
+    if(path==='/api/controls/spotify/disconnect')return json({ok:true});
+    if(path==='/api/controls/capture')return json({id:'demo-profile-'+Date.now(),label:'Captured preview profile',levels:deck.audio.devices.map(d=>({kind:'device',id:d.id,volume:d.volume,muted:d.muted})),defaults:{},actions:[]});
+    if (path === '/api/controls/state') return json(deck);
+    if (path.startsWith('/api/controls/command/') && method === 'POST') return json(controlCommand(path.split('/').pop(), q));
     if (path === '/api/state') return json(state(q.has('ev') ? +q.get('ev') : null));
-    if (path === '/api/config') { const c = await config(); return json({ version: cfgVersion(), config: { ...c, shortcuts: c.shortcuts.map(({ id, label, icon, color, toggle, cmd }) => ({ id, label, icon, color, toggle: !!toggle || cmd === 'builtin:mute' })) } }); }
+    if (path === '/api/config') { const c = await config(); const {controls,...publicConfig}=c; return json({ version: cfgVersion(), config: { ...publicConfig, shortcuts: c.shortcuts.map(({ id, label, icon, color, toggle, cmd }) => ({ id, label, icon, color, toggle: !!toggle || cmd === 'builtin:mute' })) } }); }
     if (path.startsWith('/api/run/') && method === 'POST') {
       // on / off keys flip in the demo
       const id = decodeURIComponent(path.slice(9)), sc = (await config()).shortcuts.find((s) => s.id === id);

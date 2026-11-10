@@ -42,6 +42,7 @@ test('no widget fails to build on any page', async ({ page }) => {
 });
 
 test('every widget in the catalogue builds and runs without errors', async ({ page }) => {
+  test.setTimeout(90_000); // Each catalog page runs its render and polling lifecycle; the catalog now exceeds 100 types.
   const errors = watchErrors(page);
   await page.goto('/panel/');
   // one page per widget type, at its default size, through the demo's stored settings

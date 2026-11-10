@@ -14,7 +14,7 @@ public sealed record ObsSnapshot(bool Connected, string? Error, bool Streaming, 
 /// OBS Studio through obs-websocket 5 (built into OBS 28+; Tools › WebSocket Server Settings). Keeps one connection
 /// while enabled, reads the stream / recording state and scenes every two seconds, and runs the OBS widget's buttons.
 /// </summary>
-public sealed class ObsMonitor(ConfigStore config, ILogger<ObsMonitor> log) : BackgroundService
+public sealed partial class ObsMonitor(ConfigStore config, ILogger<ObsMonitor> log) : BackgroundService
 {
     private volatile ObsSnapshot _snap = new(false, null, false, 0, false, false, 0, null, [], null, null);
     private ClientWebSocket? _ws;
@@ -134,7 +134,7 @@ public sealed class ObsMonitor(ConfigStore config, ILogger<ObsMonitor> log) : Ba
     /// <summary>The OBS widget's buttons: record, pause, stream, scene, mic.</summary>
     public async Task<string?> ActAsync(string action, string? scene)
     {
-        if (!config.Get().Widgets().Any(w => w.Type == "obs" && w.Bool("control") == true))
+        if (!config.Get().Widgets().Any(w => (w.Type == "obs" || w.Type.StartsWith("obs-")) && w.Bool("control") == true))
             return "controlling OBS is turned off in the widget's settings";
         try
         {

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0 — 2026-11-10
+
+- Add 58 Control Deck widget types and six templates, bringing the catalog to 113 widgets and 30 templates.
+- Add native Windows application/device audio faders, channel balance, meters, microphone controls, audio-role
+  selection, captured profiles, disconnect-safe push-to-talk, ducking and opt-in PC audio listening.
+- Add media source/transport/seek/mode controls, Spotify PKCE connection with private token storage, queue/library/
+  playlist actions, computer-side soundboard/radio and a sleep fade/pause timer.
+- Add application dock/focus, configured keys/macros/snippets/projects, window/display profiles, desktop switching,
+  monitor brightness, power plans and hold-confirmed power controls.
+- Add OBS mixer/scenes/sources/recording/stream/replay/transition/virtual-camera panels, meeting shortcuts and timers,
+  tracked build/dev-server jobs, service controls and GitHub workflow bindings. Existing Docker/HA controls remain.
+- Add optional SoundVolumeView routing, measured Voicemeeter controls, MIDI pads and OSC messages. External programs,
+  accounts and hardware require setup; Windows native features do not imply Linux/macOS parity.
+- Add desktop binding/profile setup, dependency feedback and ID-only phone control requests. Prevent an ambiguous
+  submitted control POST from being automatically retried over Wi-Fi.
+
+
 ## 0.7.3 — 2026-11-10
 
 - Fix the launch crash on Android 9 and 10 (API 28–29), reported in

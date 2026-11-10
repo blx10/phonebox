@@ -8,6 +8,7 @@ namespace PhoneBox.Agent;
 public sealed class AgentConfig
 {
     public CodexBarConfig CodexBar { get; set; } = new();
+    public ControlDeckConfig Controls { get; set; } = new();
     public string? DeviceSerial { get; set; }
     public string? AdbPath { get; set; }
     public WeatherConfig Weather { get; set; } = new();
@@ -399,6 +400,13 @@ public sealed partial class ConfigStore(string path)
         c.CodexBar.PageSize = Math.Clamp(c.CodexBar.PageSize, 0, 6);
         c.CodexBar.RotateInterval = Math.Clamp(c.CodexBar.RotateInterval, 2, 300);
         c.Night ??= new();
+        c.Controls ??= new();
+        c.Controls.Actions ??= [];
+        c.Controls.Profiles ??= [];
+        c.Controls.Actions = c.Controls.Actions.Where(a => a is not null && !string.IsNullOrWhiteSpace(a.Id)).DistinctBy(a => a.Id).Take(512).ToList();
+        foreach (var action in c.Controls.Actions) { action.Target ??= ""; action.Kind ??= "shortcut"; action.Label ??= action.Id; }
+        c.Controls.Profiles = c.Controls.Profiles.Where(p => p is not null && !string.IsNullOrWhiteSpace(p.Id)).DistinctBy(p => p.Id).Take(128).ToList();
+        foreach (var profile in c.Controls.Profiles) { profile.Levels = (profile.Levels ?? []).Where(l => l is not null).Take(512).ToList(); profile.Defaults ??= []; profile.Actions = (profile.Actions ?? []).Where(a => !string.IsNullOrEmpty(a)).Take(64).ToList(); profile.Label ??= profile.Id; }
         c.Display ??= new();
         c.Display.IdleReturnSec = Math.Clamp(c.Display.IdleReturnSec, 0, 3600);
         c.Display.SwitchCountdownSec = Math.Clamp(c.Display.SwitchCountdownSec, 0, 30);

@@ -9,6 +9,7 @@ import './widgets/time.js';
 import './widgets/pc.js';
 import './widgets/sky.js';
 import './widgets/web.js';
+import './widgets/controls.js';
 
 // PhoneBox desk panel. Pages are 12 × 6 grids of widgets, designed in the agent's settings page.
 // The panel talks to the PhoneBox agent through "/agent/*", which the Android shell proxies over USB

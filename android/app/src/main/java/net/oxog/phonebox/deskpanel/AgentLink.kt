@@ -167,18 +167,25 @@ class AgentLink(context: Context) {
     }
 
     private fun send(c: HttpURLConnection, method: String, readTimeout: Int = 4000): Reply {
+        val controlPost = method == "POST" && c.url.path.startsWith("/api/controls/")
         c.requestMethod = method
         c.setRequestProperty("X-PhoneBox-App", appVersion) // lets the agent offer updates
         c.setRequestProperty("X-PhoneBox-Device", deviceId)
         c.setRequestProperty("X-PhoneBox-Model", deviceModel)
-        c.readTimeout = readTimeout
+        // A workflow or service restart can take longer than a state poll.
+        c.readTimeout = if (controlPost) 30000 else readTimeout
         c.useCaches = false
         if (method == "POST") {
             c.doOutput = true
             c.setFixedLengthStreamingMode(0)
             c.outputStream.close()
         }
-        val code = c.responseCode
+        val code = try { c.responseCode } catch (e: java.io.IOException) {
+            if (!controlPost) throw e
+            // The command body was already submitted. Trying the Wi-Fi route now could run a macro or toggle twice.
+            c.disconnect()
+            return Reply(504, "application/json", ByteArrayInputStream("""{"ok":false,"error":"The command result is unknown; check the computer before retrying"}""".toByteArray()))
+        }
         val body = (if (code >= 400) c.errorStream else c.inputStream) ?: ByteArrayInputStream(ByteArray(0))
         return Reply(code, c.contentType, body)
     }

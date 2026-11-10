@@ -75,6 +75,13 @@ public sealed class ObsTests : IDisposable
                     "GetSceneList" => new { currentProgramSceneName = _scene, scenes = new[] { new { sceneName = "BRB" }, new { sceneName = "Desk" }, new { sceneName = "Camera" } } },
                     "GetSpecialInputs" => new { mic1 = "Mic/Aux" },
                     "GetInputMute" => new { inputMuted = true },
+                    "GetInputList" => new { inputs = new[] { new { inputName = "Mic/Aux" } } },
+                    "GetInputVolume" => new { inputVolumeMul = 0.65 },
+                    "GetSceneItemList" => new { sceneItems = new[] { new { sceneItemId = 7, sourceName = "Webcam", sceneItemEnabled = true } } },
+                    "GetSceneTransitionList" => new { transitions = new[] { new { transitionName = "Fade" } } },
+                    "GetCurrentSceneTransition" => new { transitionName = "Fade", transitionDuration = 300 },
+                    "GetReplayBufferStatus" => new { outputActive = true },
+                    "GetVirtualCamStatus" => new { outputActive = false },
                     _ => new { },
                 };
                 if (type == "ToggleRecord") _recording = !_recording;
@@ -128,6 +135,36 @@ public sealed class ObsTests : IDisposable
     {
         var obs = Monitor(Password, control: false);
         Assert.NotNull(await obs.ActAsync("record", null));
+        Assert.False((await obs.DeckAct("record",null,null,null,default)).Ok);
+    }
+
+    [Fact]
+    public async Task DeckReadsCapabilitiesAndSendsOnlyValidatedResources()
+    {
+        var obs=Monitor(Password);await obs.StartAsync(default);
+        try
+        {
+            await Until(()=>obs.Snapshot().Connected);
+            var state=await obs.DeckSnapshot(default);
+            Assert.Equal(65,state["inputs"]![0]!["volume"]!.GetValue<double>());
+            Assert.True(state["replayActive"]!.GetValue<bool>());
+            Assert.False((await obs.DeckAct("volume","unknown",50,null,default)).Ok);
+            Assert.False((await obs.DeckAct("volume","Mic/Aux",101,null,default)).Ok);
+            Assert.False((await obs.DeckAct("source","99",null,false,default)).Ok);
+            Assert.False((await obs.DeckAct("transition","unknown",null,null,default)).Ok);
+            Assert.True((await obs.DeckAct("volume","Mic/Aux",45,null,default)).Ok);
+            Assert.True((await obs.DeckAct("source","7",null,false,default)).Ok);
+            Assert.True((await obs.DeckAct("transition","Fade",null,null,default)).Ok);
+            Assert.True((await obs.DeckAct("save-replay",null,null,null,default)).Ok);
+            Assert.True((await obs.DeckAct("camera",null,null,null,default)).Ok);
+            lock(_requests)
+            {
+                Assert.Single(_requests,r=>r=="SetInputVolume");
+                Assert.Contains("SetSceneItemEnabled:Desk",_requests);
+                Assert.Contains("SaveReplayBuffer",_requests);Assert.Contains("ToggleVirtualCam",_requests);
+            }
+        }
+        finally { await obs.StopAsync(default); }
     }
 
     [Fact]
