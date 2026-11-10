@@ -36,7 +36,9 @@ public static partial class UnixSystem
             var vm = Sh.Run("vm_stat") ?? "";
             var page = PageSizeRe().Match(vm) is { Success: true } ps ? double.Parse(ps.Groups[1].Value) : 4096;
             double Pages(string name) => Regex.Match(vm, $@"{Regex.Escape(name)}:\s+(\d+)") is { Success: true } m ? double.Parse(m.Groups[1].Value) : 0;
-            var used = (Pages("Pages active") + Pages("Pages wired down") + Pages("Pages occupied by compressor")) * page;
+            var anon = Pages("Anonymous pages");
+            var app = anon > 0 ? Math.Max(0, anon - Pages("Pages purgeable")) : Pages("Pages active");
+            var used = (app + Pages("Pages wired down") + Pages("Pages occupied by compressor")) * page;
             return _mem = (used, total);
         }
         long Kb(string key) => File.ReadLines("/proc/meminfo").Where(l => l.StartsWith(key + ":"))
