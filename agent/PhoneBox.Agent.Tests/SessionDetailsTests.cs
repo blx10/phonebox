@@ -114,5 +114,24 @@ public sealed class SessionDetailsTests : IDisposable
         Assert.Empty(SessionMonitor.ReadClaude(_root, pid => pid == 2233));
     }
 
+    [Theory]
+    [InlineData("/Users/test/Library/Application Support/CodexBar/ClaudeProbe", true)]
+    [InlineData("/var/folders/xy/T/CodexBar/ClaudeProbe/", true)]
+    [InlineData(@"C:\Users\test\AppData\Local\Temp\CodexBar\ClaudeProbe", true)]
+    [InlineData("/Users/test/Projects/CodexBar", false)]
+    [InlineData("/Users/test/Projects/CodexBar/Sources", false)]
+    [InlineData("/Users/test/Projects/ClaudeProbeKit", false)]
+    [InlineData("/Users/test/CodexBar/ClaudeProbe/subdir", false)]
+    public void Claude_OnlyTheExactCodexBarProbeDirectoryIsIgnored(string cwd, bool ignored)
+    {
+        var claudeDir = Path.Combine(_root, ".claude", "sessions");
+        Directory.CreateDirectory(claudeDir);
+        File.WriteAllText(Path.Combine(claudeDir, "3344.json"),
+            JsonSerializer.Serialize(new { pid = 3344, sessionId = "sess-x", cwd, status = "busy" }));
+
+        var sessions = SessionMonitor.ReadClaude(_root, pid => pid == 3344).ToList();
+        Assert.Equal(ignored ? 0 : 1, sessions.Count);
+    }
+
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, true); }
 }

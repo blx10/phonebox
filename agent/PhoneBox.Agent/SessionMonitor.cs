@@ -42,7 +42,12 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log) : BackgroundServ
         }
     }
 
-    public static IEnumerable<AgentSession> ReadClaude(string? homeDir = null, Func<int, bool>? isAlive = null)
+    // CodexBar runs `claude` in <Application Support or temp>/CodexBar/ClaudeProbe to read usage.
+    // Match only that exact directory so real projects that merely contain "CodexBar" stay visible.
+    internal static bool IsCodexBarProbe(string cwd) =>
+        cwd.Replace('\\', '/').TrimEnd('/').EndsWith("/CodexBar/ClaudeProbe", StringComparison.OrdinalIgnoreCase);
+
+    internal static IEnumerable<AgentSession> ReadClaude(string? homeDir = null, Func<int, bool>? isAlive = null)
     {
         var home = homeDir ?? Home;
         var aliveCheck = isAlive ?? Alive;
@@ -61,12 +66,7 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log) : BackgroundServ
                 var name = Str(r, "name") ?? Path.GetFileName(cwd.TrimEnd('\\', '/'));
                 var project = Path.GetFileName(cwd.TrimEnd('\\', '/'));
 
-                if (project.Contains("ClaudeProbe", StringComparison.OrdinalIgnoreCase)
-                    || cwd.Contains("ClaudeProbe", StringComparison.OrdinalIgnoreCase)
-                    || cwd.Contains("CodexBar", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
+                if (IsCodexBarProbe(cwd)) continue;
 
                 s = new AgentSession(
                     Id: "claude:" + (Str(r, "sessionId") ?? pid.ToString()),
