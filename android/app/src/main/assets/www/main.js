@@ -1120,7 +1120,10 @@ let swipeStartTime = 0;
 let swipeTracking = false;
 
 pager.addEventListener('touchstart', (e) => {
+  swipeTracking = false;
   if (e.touches.length !== 1 || pages.length < 2) return;
+  // Dragging a slider, the volume bar or a list must never flip the page.
+  if (volDragging || e.target.closest?.('button, input, textarea, select, a, [contenteditable], .s-list, .vb')) return;
   swipeStartX = e.touches[0].clientX;
   swipeStartY = e.touches[0].clientY;
   swipeStartPage = curPage;
@@ -1141,10 +1144,10 @@ pager.addEventListener('touchend', (e) => {
   if (dt < 700 && Math.abs(dx) >= 40 && Math.abs(dx) > Math.abs(dy) * 1.3) {
     if (dx < 0 && swipeStartPage === pages.length - 1 && curPage === pages.length - 1) {
       haptic();
-      goPage(0);
+      goPage(0, true);
     } else if (dx > 0 && swipeStartPage === 0 && curPage === 0) {
       haptic();
-      goPage(pages.length - 1);
+      goPage(pages.length - 1, true);
     }
   }
 }, { passive: true });
