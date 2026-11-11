@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.3 — 2026-11-11
+
+- Support Podman for the containers widget ([#12](https://github.com/ersinkoc/phonebox/pull/12)). Parse Podman's JSON
+  array and NDJSON container/stats output (`Id`, `Names` arrays, object labels, numeric CPU/memory), hide pod infra
+  containers, and fall back between `docker` and `podman` when one is unavailable. The first request no longer reports
+  "Docker is not running" before the cache is filled, and start/stop/restart waits for an in-flight poll so the panel
+  shows the new state.
+- Match Activity Monitor's "Memory Used" on macOS: app memory (anonymous minus purgeable) plus wired and compressed
+  pages ([#11](https://github.com/ersinkoc/phonebox/pull/11)).
+- Hide CodexBar's own `claude` usage probe from the sessions widget, matching only its exact
+  `CodexBar/ClaudeProbe` directory so real projects with similar names stay visible
+  ([#13](https://github.com/ersinkoc/phonebox/pull/13)).
+- Swipe past the last page to wrap to the first, and past the first to wrap to the last
+  ([#14](https://github.com/ersinkoc/phonebox/pull/14)). The jump is instant, and drags that start on sliders,
+  buttons, the volume bar or lists never flip pages.
+
 ## 0.9.2 — 2026-11-10
 
 - Fix webhook JSON payloads with nonnumeric `ttl` fields causing an unhandled exception. Only integer payload TTLs
