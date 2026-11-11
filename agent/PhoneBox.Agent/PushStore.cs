@@ -27,6 +27,7 @@ public sealed partial class PushStore
     private readonly ILogger<PushStore> _log;
     private readonly System.Threading.Timer _saveTimer;
     private long _seq;
+    private int _savePending;
     private long _version = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     /// <param name="dataPath">Where values are kept (tests pass a temporary file); default: data.json next to config.json.</param>
@@ -131,11 +132,12 @@ public sealed partial class PushStore
     private void Changed()
     {
         Interlocked.Exchange(ref _version, Math.Max(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), Interlocked.Read(ref _version) + 1));
-        _saveTimer.Change(2000, Timeout.Infinite); // debounce disk writes
+        if (Interlocked.Exchange(ref _savePending, 1) == 0) _saveTimer.Change(2000, Timeout.Infinite); // at most one write per 2 s, never postponed
     }
 
     private void Persist()
     {
+        Interlocked.Exchange(ref _savePending, 0);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_dataPath)!);

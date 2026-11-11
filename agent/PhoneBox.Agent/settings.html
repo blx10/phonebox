@@ -724,6 +724,12 @@ function deckCols() {
 }
 
 function optVal(w, o) { return w.options && o.key in w.options ? w.options[o.key] : o.default; }
+/** The catalog's defaults for a widget type, written out so the panel and the agent see what the inspector shows. */
+function defaultOptions(type) {
+  const options = {};
+  for (const o of widgetDef(type)?.options || []) options[o.key] = Array.isArray(o.default) ? [...o.default] : o.default;
+  return options;
+}
 function setWOpt(w, key, val) { w.options = { ...(w.options || {}), [key]: val }; changed(); renderCanvas(); }
 
 function getStackItems(w, o) {
@@ -801,12 +807,11 @@ function overlaps(page, w, x, y, ww, hh) {
 
 /** First free spot for a ww × hh widget, shrinking it if the page is too full. */
 function freeSpot(page, ww, hh, minW, minH) {
-  for (let s = 0; s < 6; s++) {
-    for (let y = 0; y + hh <= catalog.rows; y++)
-      for (let x = 0; x + ww <= catalog.cols; x++)
-        if (!overlaps(page, null, x, y, ww, hh)) return { x, y, w: ww, h: hh };
-    if (ww > minW) ww = Math.max(minW, ww - 2); else if (hh > minH) hh = Math.max(minH, hh - 1); else break;
-  }
+  for (let h2 = hh; h2 >= Math.min(minH, hh); h2--)
+    for (let w2 = ww; w2 >= Math.min(minW, ww); w2--)
+      for (let y = 0; y + h2 <= catalog.rows; y++)
+        for (let x = 0; x + w2 <= catalog.cols; x++)
+          if (!overlaps(page, null, x, y, w2, h2)) return { x, y, w: w2, h: h2 };
   return null;
 }
 
@@ -976,7 +981,7 @@ function renderCanvas() {
           selWidget = i;
           renderCanvas();
           renderInspector();
-          toast(`${widgetDef(type).name} Smart Stack'e eklendi`);
+          toast(`${widgetDef(type).name} added to the Smart Stack`);
         }
       });
     }
@@ -1039,9 +1044,7 @@ function addWidget(d) {
   const p = curPage();
   const spot = freeSpot(p, d.w, d.h, d.minW, d.minH);
   if (!spot) { toast('No free space on this page — make room first', true); return; }
-  const options = {};
-  for (const o of d.options) options[o.key] = Array.isArray(o.default) ? [...o.default] : o.default;
-  p.widgets.push({ id: '', type: d.type, ...spot, options });
+  p.widgets.push({ id: '', type: d.type, ...spot, options: defaultOptions(d.type) });
   selWidget = p.widgets.length - 1;
   renderCanvas(); renderInspector(); renderTabsOnly(); changed();
   $('pageTabs').querySelectorAll('.pt-n')[selPage].textContent = p.widgets.length;
@@ -1079,9 +1082,10 @@ function renderInspector() {
 
 function renderStackWidgetsOption(w, o) {
   const items = getStackItems(w, o);
-  const save = () => {
+  // typing in a child's option must not rebuild the inspector: the field would lose its focus after one character
+  const save = (rerender = true) => {
     setWOpt(w, o.key, items.map((it) => ({ id: it.id, type: it.type, enabled: it.enabled !== false, options: it.options || {} })));
-    renderInspector();
+    if (rerender) renderInspector();
   };
 
   const move = (from, to) => {
@@ -1104,7 +1108,7 @@ function renderStackWidgetsOption(w, o) {
   const add = (type, atIdx = -1) => {
     if (items.length >= 12) { toast('A stack can contain up to 12 widgets', true); return; }
     if (!type || ['stack', 'command'].includes(type) || !catalog.widgets.some((cw) => cw.type === type)) return;
-    const newItem = { id: `card-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, type, enabled: true, options: {} };
+    const newItem = { id: `card-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, type, enabled: true, options: defaultOptions(type) };
     let newIdx;
     if (atIdx >= 0 && atIdx <= items.length) {
       items.splice(atIdx, 0, newItem);
@@ -1198,7 +1202,7 @@ function renderStackWidgetsOption(w, o) {
           ? subOptions.map((subO) => optionField(subW, subO, (key, val) => {
               item.options = item.options || {};
               item.options[key] = val;
-              save();
+              save(false);
             }))
           : [h('p', { class: 'hint', style: { margin: '2px 0 0', fontSize: '12px' } }, 'This widget has no additional settings.')])
       );
@@ -1241,7 +1245,7 @@ function renderStackWidgetsOption(w, o) {
     h('button', { type: 'button', class: 'btn sm', onclick: () => {
       const sel = $('stackQuickAdd');
       if (sel?.value) add(sel.value);
-    } }, '＋ Ekle')
+    } }, '＋ Add')
   );
 
   return h('div', { class: 'field' },
@@ -1279,10 +1283,11 @@ function optionField(w, o, onValChange) {
     case 'select':
       return field(h('select', { onchange: (e) => set(o.key, e.target.value) }, ...o.choices.map(([k, l]) => h('option', { value: k, selected: k === v }, l))));
     case 'multi': {
-      const cur = Array.isArray(v) ? v : [];
-      return field(h('div', { class: 'opts' }, ...o.choices.map(([k, l]) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: cur.includes(k), onchange: (e) => {
-        const next = o.choices.map((c) => c[0]).filter((x) => (x === k ? e.target.checked : cur.includes(x)));
-        set(o.key, next.length ? next : cur);
+      // read the stored value on every change: the inspector is not rebuilt between two ticks
+      const cur = () => { const x = optVal(w, o); return Array.isArray(x) ? x : []; };
+      return field(h('div', { class: 'opts' }, ...o.choices.map(([k, l]) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: cur().includes(k), onchange: (e) => {
+        const next = o.choices.map((c) => c[0]).filter((x) => (x === k ? e.target.checked : cur().includes(x)));
+        set(o.key, next.length ? next : cur());
         if (!next.length) { e.target.checked = true; toast('Keep at least one', true); }
       } }), l))));
     }
@@ -1308,8 +1313,9 @@ function optionField(w, o, onValChange) {
     case 'number':
       return field(h('input', { type: 'number', min: o.min, max: o.max, value: v ?? '', style: { maxWidth: '140px' }, onchange: (e) => set(o.key, e.target.value === '' ? o.default : Number(e.target.value)) }));
     case 'textarea':
-      return field(h('textarea', { rows: o.key === 'command' ? 3 : 4, style: o.key === 'command' ? { fontFamily: 'Consolas, monospace', fontSize: '12.5px' } : {}, oninput: (e) => set(o.key, e.target.value) }, v ?? ''),
-        o.key === 'command' ? h('span', { class: 'hint' }, 'Runs with PowerShell on this PC. The phone never sees the command, only its output. Tap the widget on the phone to run it now.') : null);
+      return field(h('textarea', { rows: /^command/.test(o.key) ? 3 : 4, style: /^command/.test(o.key) ? { fontFamily: 'Consolas, monospace', fontSize: '12.5px' } : {}, oninput: (e) => set(o.key, e.target.value) }, v ?? ''),
+        o.key === 'command' ? h('span', { class: 'hint' }, 'Runs with PowerShell on Windows. The phone never sees the command, only its output. Tap the widget on the phone to run it now.')
+          : o.key === 'commandUnix' ? h('span', { class: 'hint' }, 'On Linux (bash) and macOS (zsh) this one runs instead; empty = the command above.') : null);
     case 'lines':
       return field(h('textarea', { rows: 5, oninput: (e) => set(o.key, e.target.value.split('\n').map((x) => x.trim()).filter(Boolean)) }, (Array.isArray(v) ? v : []).join('\n')));
     case 'color':
@@ -1320,9 +1326,9 @@ function optionField(w, o, onValChange) {
         ...cfg.shortcuts.map((s) => h('option', { value: s.id, selected: s.id === v }, `${s.icon} ${s.label}`))),
         h('span', { class: 'hint' }, 'New shortcuts get their id when you save.'));
     case 'shortcuts': {
-      const cur = Array.isArray(v) ? v : [];
-      return field(h('div', { class: 'opts' }, ...cfg.shortcuts.map((s) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: cur.includes(s.id), onchange: (e) => {
-        set(o.key, cfg.shortcuts.map((x) => x.id).filter((id) => (id === s.id ? e.target.checked : cur.includes(id))));
+      const cur = () => { const x = optVal(w, o); return Array.isArray(x) ? x : []; };
+      return field(h('div', { class: 'opts' }, ...cfg.shortcuts.map((s) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: cur().includes(s.id), onchange: (e) => {
+        set(o.key, cfg.shortcuts.map((x) => x.id).filter((id) => (id === s.id ? e.target.checked : cur().includes(id))));
       } }), `${s.icon} ${s.label}`))));
     }
     default:
@@ -1343,6 +1349,8 @@ function miniMap(widgets) {
 function openTemplates(index) {
   const pick = (t) => {
     const widgets = JSON.parse(JSON.stringify(t ? t.widgets : []));
+    // a template lists only what differs from the defaults; the rest is written out like for a widget added by hand
+    for (const w of widgets) w.options = { ...defaultOptions(w.type), ...(w.options || {}) };
     if (index == null) {
       cfg.pages.push({ id: '', title: t ? t.title : 'New page', icon: t ? t.icon : '▫️', enabled: true, widgets });
       selPage = cfg.pages.length - 1;
@@ -1567,6 +1575,7 @@ function ruleCard(r, i) {
 
   const act = [];
   if (r.then === 'goto') act.push(h('select', { onchange: (e) => set('page', e.target.value) },
+    ...(cfg.pages.some((p) => p.id === r.page) ? [] : [h('option', { value: r.page || '', selected: true }, '— pick a page —')]),
     ...cfg.pages.map((p) => h('option', { value: p.id, selected: p.id === r.page }, `${p.icon || ''} ${p.title}`.trim()))));
   if (r.then === 'notify') act.push(text('text', 'text ({detail} = what happened)', 'grow'),
     sel(r.level || 'info', { info: 'info', ok: 'ok', warn: 'warning', error: 'error' }, (v) => set('level', v)));
@@ -1604,7 +1613,7 @@ function ruleCard(r, i) {
       } }, 'Test'),
       h('button', { class: 'btn sm danger', onclick: () => { cfg.rules.splice(i, 1); renderRules(); changed(); } }, 'Delete')),
     h('div', { class: 'line' }, h('b', {}, 'When'), sel(r.when, TRIGGERS, (v) => { r.match = null; r.value = null; set('when', v, true); }), ...cond),
-    h('div', { class: 'line' }, h('b', {}, 'Then'), sel(r.then, ACTIONS, (v) => set('then', v, true)), ...act),
+    h('div', { class: 'line' }, h('b', {}, 'Then'), sel(r.then, ACTIONS, (v) => { if (v === 'goto' && !cfg.pages.some((p) => p.id === r.page)) r.page = cfg.pages[0]?.id || null; set('then', v, true); }), ...act),
     r.then !== 'notify' ? h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: r.whileActive !== false, onchange: (e) => set('whileActive', e.target.checked) }),
       r.then === 'goto' ? 'Only while it lasts (then go back to the previous page)' : r.then === 'shortcut' ? 'Only while it lasts (a toggle shortcut switches back off)' : 'Only while it lasts (then remove the value)') : null,
     opts);
@@ -1895,7 +1904,7 @@ function renderControlSettings() {
     btn('Disconnect Spotify',async()=>{await request('spotify/disconnect');auth.textContent='Disconnected';}));
   root.append(spotify);
   const integration=h('details',{},h('summary',{},'Optional audio integrations'),field('SoundVolumeView executable path',c,'mixerExecutable'),field('Installed Voicemeeter Remote DLL path (64-bit)',c,'mixerLibrary'));root.append(integration);
-  const hints={shortcut:'Target: existing shortcut ID.',app:'Target: application shortcut ID.',macro:'Target: macro shortcut ID.',snippet:'Target: text shortcut ID.',meeting:'Target: meeting shortcut ID.',discord:'Target: Discord shortcut ID.',focus:'Target: work/focus macro shortcut ID.',project:'Target: folder/project shortcut ID.',keys:'Target: chord, e.g. Ctrl+Shift+M.',text:'Target: text to type.',task:'Target: executable shortcut ID. Output remains on the computer.',server:'Target: executable shortcut ID. Stop affects only the process started by this control.',sound:'Target: full sound file path. Device: output ID. Value: volume 0–100.',radio:'Target: direct HTTP(S) stream URL. Device: output ID. Value: volume 0–100.',playlist:'Target: spotify:playlist:… (also album, track or episode).',midi:'Target: hex MIDI bytes, e.g. B0 07 {value}. Device: numeric output port. Value: 0–127.',osc:'Target: OSC address, e.g. /volume. Device: host:port. Value: numeric float.',service:'Target: Windows service name. Argument: start, stop, restart.',workflow:'Target: owner/repo. Argument: workflow filename. Device: optional branch/ref.','window-layout':'Target: process name. Argument: left, right, center, max.','display-profile':'Target: monitor ID. Argument: JSON with width, height, hz, optional x/y.','audio-route':'Target: process.exe. Device: output ID. Requires SoundVolumeView.',mixer:'Target: Strip[0].Gain or Bus[0].Gain. Value: −60 to 12 dB.','mixer-mute':'Target: Strip[0].Mute (or supported toggle). Value: 0 or 1.',presentation:'Target: POWERPNT or soffice. Argument: start, next, prev, end, blank.'};
+  const hints={shortcut:'Target: existing shortcut ID.',app:'Target: application shortcut ID.',macro:'Target: macro shortcut ID.',snippet:'Target: text shortcut ID.',meeting:'Target: meeting shortcut ID.',discord:'Target: Discord shortcut ID.',focus:'Target: work/focus macro shortcut ID.',project:'Target: folder/project shortcut ID.',keys:'Target: chord, e.g. Ctrl+Shift+M.',text:'Target: text to type.',task:'Target: executable shortcut ID. Output remains on the computer.',server:'Target: executable shortcut ID. Stop affects only the process started by this control.',sound:'Target: full sound file path. Device: output ID. Value: volume 0–100.',radio:'Target: direct HTTP(S) stream URL. Device: output ID. Value: volume 0–100.',playlist:'Target: spotify:playlist:… (also album, track or episode).',midi:'Target: hex MIDI bytes, e.g. B0 07 {value}. Device: numeric output port. Value: 0–127.',osc:'Target: OSC address, e.g. /volume. Device: host:port. Value: whole number (sent as an OSC float).',service:'Target: Windows service name. Argument: start, stop, restart.',workflow:'Target: owner/repo. Argument: workflow filename. Device: optional branch/ref.','window-layout':'Target: process name. Argument: left, right, center, max.','display-profile':'Target: monitor ID. Argument: JSON with width, height, hz, optional x/y.','audio-route':'Target: process.exe. Device: output ID. Requires SoundVolumeView.',mixer:'Target: Strip[0].Gain or Bus[0].Gain. Value: −60 to 12 dB.','mixer-mute':'Target: Strip[0].Mute (or supported toggle). Value: 0 or 1.',presentation:'Target: POWERPNT or soffice. Argument: start, next, prev, end, blank.'};
   const actions=h('div');root.append(h('h4',{},'Control bindings'),actions);
   const renderActions=()=>actions.replaceChildren(...c.actions.map(a=>{
     const box=h('details',{},h('summary',{},a.label || a.id));

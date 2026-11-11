@@ -62,6 +62,8 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log) : BackgroundServ
                 var r = doc.RootElement;
                 var pid = r.TryGetProperty("pid", out var p) && p.TryGetInt32(out var pi) ? pi : 0;
                 if (pid == 0 || !aliveCheck(pid)) continue;
+                // a session that was killed leaves its file behind; Windows may give its PID to another program later
+                if (OperatingSystem.IsWindows() && long.TryParse(Str(r, "procStart"), out var procStart) && !SameStart(pid, procStart)) continue;
                 var cwd = Str(r, "cwd") ?? "";
                 var name = Str(r, "name") ?? Path.GetFileName(cwd.TrimEnd('\\', '/'));
                 var project = Path.GetFileName(cwd.TrimEnd('\\', '/'));
@@ -218,6 +220,13 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log) : BackgroundServ
         }
         return new CodexDetails(model, effort, totalTokens, inputTokens, outputTokens, cachedInputTokens,
             reasoningTokens, lastInputTokens, contextWindow, lastActivityAt, turnStartedAt, lifecycle, lastTool, start + complete);
+    }
+
+    /// <summary>Claude Code writes its process' start time (a FILETIME) into the session file; another process with the same PID started later.</summary>
+    private static bool SameStart(int pid, long fileTimeUtc)
+    {
+        try { using var p = Process.GetProcessById(pid); return Math.Abs(p.StartTime.ToFileTimeUtc() - fileTimeUtc) < 10_000_000; } // 1 s
+        catch { return true; }
     }
 
     private static bool Alive(int pid)

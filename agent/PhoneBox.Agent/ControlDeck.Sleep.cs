@@ -6,8 +6,9 @@ public sealed partial class ControlDeck
 
     internal static bool PlayerSessionMatches(string player, string application)
     {
-        static string Clean(string text) => Path.GetFileNameWithoutExtension(text.Split('!')[0].Split('_')[0]).ToLowerInvariant();
-        var name = Clean(application); return name.Length > 2 && Clean(player) == name;
+        static string Clean(string text) => (text.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? text[..^4] : text).ToLowerInvariant();
+        var name = Clean(application); var bang = player.IndexOf('!');
+        return name.Length > 2 && (Clean(player) == name || bang >= 0 && Clean(player[(bang + 1)..]) == name);
     }
 
     private void RestoreFade(string player)

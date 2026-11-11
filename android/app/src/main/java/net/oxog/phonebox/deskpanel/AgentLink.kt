@@ -167,7 +167,8 @@ class AgentLink(context: Context) {
     }
 
     private fun send(c: HttpURLConnection, method: String, readTimeout: Int = 4000): Reply {
-        val controlPost = method == "POST" && c.url.path.startsWith("/api/controls/")
+        // every POST acts on the computer (a container restart, a Home Assistant switch, a macro): none may run twice
+        val controlPost = method == "POST"
         c.requestMethod = method
         c.setRequestProperty("X-PhoneBox-App", appVersion) // lets the agent offer updates
         c.setRequestProperty("X-PhoneBox-Device", deviceId)

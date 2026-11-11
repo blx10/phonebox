@@ -274,11 +274,14 @@ public sealed class RuleEngine(ConfigStore config, PushStore push, SessionMonito
                 if (match.Length == 0 || !push.Snapshot().TryGetValue(match, out var item)) return (false, "");
                 var d = item.Data;
                 if (!string.IsNullOrEmpty(r.Op) && r.Op != "on") return Compare(d, r.Op, r.Arg) ? (true, Text(d)) : (false, "");
-                var truthy = d.ValueKind switch
+                // {"value": "off", "sub": …} is judged by its value, as Compare and a toggle shortcut's state read it
+                var v = d.ValueKind == JsonValueKind.Object && d.TryGetProperty("value", out var inner) ? inner : d;
+                var truthy = v.ValueKind switch
                 {
                     JsonValueKind.True => true,
-                    JsonValueKind.Number => d.GetDouble() != 0,
-                    JsonValueKind.String => d.GetString() is { Length: > 0 } t && t is not ("0" or "false" or "off" or "no"),
+                    JsonValueKind.Number => v.GetDouble() != 0,
+                    // any case, like a toggle shortcut's state: "OFF" (MQTT), "False" (PowerShell's $false)
+                    JsonValueKind.String => v.GetString() is { Length: > 0 } t && t.ToLowerInvariant() is not ("0" or "false" or "off" or "no"),
                     JsonValueKind.Object or JsonValueKind.Array => true,
                     _ => false,
                 };
@@ -312,9 +315,16 @@ public sealed class RuleEngine(ConfigStore config, PushStore push, SessionMonito
     public static bool InWindow(string window, TimeSpan now)
     {
         var parts = window.Split('-', StringSplitOptions.TrimEntries);
-        if (!TimeSpan.TryParse(parts[0], out var from)) return false;
-        var to = parts.Length > 1 && TimeSpan.TryParse(parts[1], out var t) ? t : from + TimeSpan.FromMinutes(1);
+        if (!Clock(parts[0], out var from)) return false;
+        var to = parts.Length > 1 && Clock(parts[1], out var t) ? t : from + TimeSpan.FromMinutes(1);
         return from <= to ? now >= from && now < to : now >= from || now < to;
+    }
+
+    /// <summary>A time of day; "24:00" is the end of the day (TimeSpan.TryParse rejects it).</summary>
+    private static bool Clock(string text, out TimeSpan time)
+    {
+        if (text is "24:00" or "24:00:00") { time = TimeSpan.FromDays(1); return true; }
+        return TimeSpan.TryParse(text, out time);
     }
 
     private HashSet<string> Processes()

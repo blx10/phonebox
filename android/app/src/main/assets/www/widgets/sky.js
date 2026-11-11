@@ -66,7 +66,7 @@ W.air = {
         cat.textContent = band[1] + ' · European AQI';
         chips.replaceChildren(...[['PM2.5', c.pm2_5], ['PM10', c.pm10], ['O₃', c.ozone], ['NO₂', c.nitrogen_dioxide]]
           .filter((x) => x[1] != null).map(([n, x]) => h('span', 'chip', `${n} ${Math.round(x)}`)));
-      } catch (_) { cat.textContent = 'Unavailable'; }
+      } catch (_) { cat.textContent = 'Unavailable'; return false; }
     });
     return { update: load };
   },

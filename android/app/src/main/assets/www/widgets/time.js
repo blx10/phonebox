@@ -80,6 +80,7 @@ W.stopwatch = {
 
 W.timer = {
   needs: ['tick'],
+  always: true, // the alarm goes off on whatever page is showing
   create(box, { o, page, w }) {
     const key = `tm:${page.id}/${w.id}`;
     const presets = lines(o.presets, ['1', '3', '5', '10', '15', '25']).map(Number).filter((n) => n > 0).slice(0, 8);
@@ -115,22 +116,23 @@ W.timer = {
 };
 
 W.counter = {
-  needs: [],
+  needs: ['tick'],
   create(box, { o, page, w }) {
     const key = `ct:${page.id}/${w.id}`;
-    const today = new Date().toDateString();
-    let st = store.get(key, null) || { n: 0, day: today };
-    if (o.daily && st.day !== today) st = { n: 0, day: today };
+    let st = store.get(key, null) || { n: 0, day: new Date().toDateString() };
     const step = Number(o.step) || 1;
     const num = h('div', 'ct-n'), minus = h('button', 'pb', '−'), plus = h('button', 'pb main', '+'), reset = h('button', 'mini-btn', 'Reset');
     box.style.setProperty('--q', o.color || '#a78bfa');
     box.append(h('div', 'w-title', o.label || 'Counter', reset), num, h('div', 'pomo-btns', minus, plus));
+    // "Start from zero every day" also when the panel stays open over midnight (it is never rebuilt then)
+    const fresh = () => { const today = new Date().toDateString(); if (o.daily !== false && st.day !== today) { st = { n: 0, day: today }; num.textContent = st.n; } };
     const set = (n) => { st.n = n; st.day = new Date().toDateString(); store.set(key, st); num.textContent = st.n; };
-    plus.addEventListener('click', () => { haptic(); set(st.n + step); });
-    minus.addEventListener('click', () => { haptic(); set(st.n - step); });
+    plus.addEventListener('click', () => { haptic(); fresh(); set(st.n + step); });
+    minus.addEventListener('click', () => { haptic(); fresh(); set(st.n - step); });
     reset.addEventListener('click', () => { haptic(); set(0); });
+    fresh();
     num.textContent = st.n;
-    return {};
+    return { update: fresh };
   },
 };
 

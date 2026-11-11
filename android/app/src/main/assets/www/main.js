@@ -126,7 +126,7 @@ export function shortDur(ms) {
   const hr = Math.floor(m / 60);
   return hr < 24 ? `${hr}h ${m % 60}m` : `${Math.floor(hr / 24)}d`;
 }
-export const ago = (ts) => { const d = Date.now() - ts; return d < 45_000 ? 'just now' : shortDur(d) + ' ago'; };
+export const ago = (ts) => { const d = Date.now() - ts; return d < 60_000 ? 'just now' : shortDur(d) + ' ago'; };
 export const r1 = (v) => (v == null ? '—' : (Math.round(v * 10) / 10).toString());
 export const fmtMem = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB');
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -531,6 +531,14 @@ export function openSheet(g, canKill) {
 export function closeSheet() {
   sheet = null;
   $('pSheet').hidden = true;
+  closeSessionDetails();
+}
+
+/** The session details dialog (Sessions widget) closes like the other overlays: Back, idle return, page change. */
+function closeSessionDetails() {
+  const backdrop = document.querySelector('.session-backdrop');
+  if (backdrop) backdrop.click(); // a click on the backdrop itself runs the dialog's own dismiss
+  return !!backdrop;
 }
 
 export async function loadSheet() {
@@ -769,7 +777,7 @@ export function buildLayout() {
       let inst;
       try { inst = def.create(box, ctx) || {}; } catch (e) { box.replaceChildren(h('div', 'empty', `${w.type}: ${e.message}`)); inst = {}; }
       PhoneBoxAppearance.widget(box, appearance);
-      mounted.push({ pi, def: inst.needs ? { ...def, needs: inst.needs } : def, inst, ctx, dirty: true });
+      mounted.push({ pi, def: inst.needs ? { ...def, needs: inst.needs, always: inst.always ?? def.always } : def, inst, ctx, dirty: true });
     }
     const sec = h('section', 'page', grid);
     PhoneBoxAppearance.page(sec, grid, pageAppearance);
@@ -796,7 +804,8 @@ export function emit(kind) {
   const act = activeSet();
   for (const m of mounted) {
     if (!m.def.needs.includes(kind)) continue;
-    if (act.has(m.pi)) runUpdate(m, kind); else m.dirty = true;
+    // alarms (timer, pomodoro) must go off on whatever page is showing, so those widgets get every tick
+    if (act.has(m.pi) || (m.def.always && kind === 'tick')) runUpdate(m, kind); else m.dirty = true;
   }
 }
 
@@ -1169,6 +1178,7 @@ document.addEventListener('keydown', (e) => {
 });
 window.onAndroidBack = () => {
   if (!$('approval').hidden) return; // answer it (or let it time out); Back must not dismiss a permission prompt
+  if (closeSessionDetails()) return;
   if (!$('overview').hidden) closeOverview();
   else if (sheet) closeSheet();
   else if (curPage !== homeIndex()) goPage(homeIndex(), true);
@@ -1338,6 +1348,7 @@ export function applyState(s) {
   setOnline(true);
   if (s.cfgVersion !== undefined && cfgVersion !== null && s.cfgVersion !== cfgVersion) loadConfig();
   if (s.pushVersion !== undefined && s.pushVersion !== pushVersion) loadPush();
+  if (evSeq != null && s.evSeq != null && s.evSeq < evSeq) evSeq = s.evSeq; // the agent restarted: it counts from 0 again
   if (evSeq != null) for (const e of s.events || []) if (e.seq > evSeq) handleEvent(e);
   evSeq = Math.max(evSeq ?? 0, s.evSeq ?? 0);
   // the "back" event can be missed while offline; the list of active rules settles it

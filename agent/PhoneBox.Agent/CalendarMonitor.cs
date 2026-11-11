@@ -44,6 +44,8 @@ public sealed class CalendarMonitor(ConfigStore config, ILogger<CalendarMonitor>
         }
     }
 
+    private readonly Dictionary<string, List<CalendarEvent>> _lastGood = [];
+
     private async Task Refresh(List<CalendarSource> sources, CancellationToken ct)
     {
         var events = new List<CalendarEvent>();
@@ -58,15 +60,18 @@ public sealed class CalendarMonitor(ConfigStore config, ILogger<CalendarMonitor>
                 var url = src.Url.Trim();
                 if (url.StartsWith("webcal://", StringComparison.OrdinalIgnoreCase)) url = "https://" + url[9..];
                 var text = await Http.GetStringAsync(url, ct);
-                events.AddRange(Ics.Parse(text, from, to).Select(e => e with { Calendar = name, Color = src.Color ?? "#60a5fa" }));
+                var fresh = Ics.Parse(text, from, to).Select(e => e with { Calendar = name, Color = src.Color ?? "#60a5fa" }).ToList();
+                _lastGood[src.Url] = fresh;
+                events.AddRange(fresh);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 errors.Add($"{name}: {ex.Message}");
-                // keep the last good events of this calendar
-                events.AddRange(_snap.Events.Where(e => e.Calendar == name));
+                // keep the last good events of this feed (by its address: names are optional and may repeat)
+                if (_lastGood.TryGetValue(src.Url, out var last)) events.AddRange(last);
             }
         }
+        foreach (var gone in _lastGood.Keys.Except(sources.Select(s => s.Url)).ToList()) _lastGood.Remove(gone);
         _snap = new(events.OrderBy(e => e.Start).ThenBy(e => e.Title).ToList(), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), errors);
         if (sources.Count > 0) log.LogInformation("calendars: {Count} events{Errors}", events.Count, errors.Count > 0 ? "; " + string.Join("; ", errors) : "");
     }
@@ -88,7 +93,10 @@ public static class Ics
         public string Name = name; public Dictionary<string, string> Params = pars; public string Value = value;
     }
 
-    public static IEnumerable<CalendarEvent> Parse(string text, DateTime fromUtc, DateTime toUtc)
+    public static IEnumerable<CalendarEvent> Parse(string text, DateTime fromUtc, DateTime toUtc) => Parse(text, fromUtc, toUtc, TimeZoneInfo.Local);
+
+    /// <param name="local">The zone of floating times and of TZIDs this computer does not know (the computer's own zone).</param>
+    internal static IEnumerable<CalendarEvent> Parse(string text, DateTime fromUtc, DateTime toUtc, TimeZoneInfo local)
     {
         var events = new List<List<Prop>>();
         List<Prop>? cur = null;
@@ -107,7 +115,7 @@ public static class Ics
         {
             var rid = e.FirstOrDefault(p => p.Name == "RECURRENCE-ID");
             var uid = e.FirstOrDefault(p => p.Name == "UID")?.Value;
-            if (rid is not null && uid is not null && ToUtc(rid, out _) is { } r) overrides.Add((uid, r.Ticks));
+            if (rid is not null && uid is not null && ToUtc(rid, out _, local) is { } r) overrides.Add((uid, r.Ticks));
         }
 
         var result = new List<CalendarEvent>();
@@ -115,9 +123,9 @@ public static class Ics
         {
             if (e.FirstOrDefault(p => p.Name == "STATUS")?.Value.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase) == true) continue;
             var dtStart = e.FirstOrDefault(p => p.Name == "DTSTART");
-            if (dtStart is null || ToUtc(dtStart, out var allDay) is not { } start) continue;
+            if (dtStart is null || ToUtc(dtStart, out var allDay, local) is not { } start) continue;
             var dtEnd = e.FirstOrDefault(p => p.Name == "DTEND");
-            var end = dtEnd is not null && ToUtc(dtEnd, out _) is { } en ? en
+            var end = dtEnd is not null && ToUtc(dtEnd, out _, local) is { } en ? en
                 : e.FirstOrDefault(p => p.Name == "DURATION") is { } dur && TryDuration(dur.Value, out var d) ? start + d
                 : allDay ? start.AddDays(1) : start;
             var length = end - start;
@@ -131,10 +139,13 @@ public static class Ics
             if (rrule is not null && !isOverride)
             {
                 var exdates = new HashSet<long>(e.Where(p => p.Name == "EXDATE")
-                    .SelectMany(p => p.Value.Split(',').Select(v => ToUtc(new Prop("EXDATE", p.Params, v), out _)))
+                    .SelectMany(p => p.Value.Split(',').Select(v => ToUtc(new Prop("EXDATE", p.Params, v), out _, local)))
                     .Where(x => x is not null).Select(x => x!.Value.Ticks));
-                var zone = dtStart.Params.TryGetValue("TZID", out var tz) ? FindZone(tz) : null;
-                starts = Expand(start, rrule, zone, allDay, fromUtc, toUtc)
+                // a local start (floating, or a TZID this computer does not know) keeps its wall-clock time in the
+                // computer's zone, like ToUtc reads it; only a UTC start ("...Z") repeats in UTC
+                var zone = dtStart.Value.Trim().EndsWith('Z') ? null
+                    : (dtStart.Params.TryGetValue("TZID", out var tz) ? FindZone(tz) : null) ?? local;
+                starts = Expand(start, rrule, zone, allDay, fromUtc, toUtc, local)
                     .Where(s => !exdates.Contains(s.Ticks) && !overrides.Contains((uid, s.Ticks)));
             }
             foreach (var s in starts)
@@ -151,15 +162,18 @@ public static class Ics
     private static long Ms(DateTime utc) => new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeMilliseconds();
 
     /// <summary>Occurrence starts (UTC) of a recurring event; wall-clock times stay put across DST changes.</summary>
-    private static IEnumerable<DateTime> Expand(DateTime firstUtc, string rrule, TimeZoneInfo? zone, bool allDay, DateTime fromUtc, DateTime toUtc)
+    private static IEnumerable<DateTime> Expand(DateTime firstUtc, string rrule, TimeZoneInfo? zone, bool allDay, DateTime fromUtc, DateTime toUtc, TimeZoneInfo localZone)
     {
         var r = rrule.Split(';').Select(x => x.Split('=', 2)).Where(x => x.Length == 2).ToDictionary(x => x[0].ToUpperInvariant(), x => x[1]);
         var freq = r.GetValueOrDefault("FREQ", "");
         var interval = int.TryParse(r.GetValueOrDefault("INTERVAL"), out var iv) && iv > 0 ? iv : 1;
         var count = int.TryParse(r.GetValueOrDefault("COUNT"), out var c) ? c : int.MaxValue;
-        DateTime? until = r.TryGetValue("UNTIL", out var u) && ToUtc(new Prop("UNTIL", [], u), out _) is { } ut ? ut : null;
+        DateTime? until = r.TryGetValue("UNTIL", out var u) && ToUtc(new Prop("UNTIL", [], u), out _, localZone) is { } ut ? ut : null;
         var byDay = r.TryGetValue("BYDAY", out var bd) ? bd.Split(',').Select(ParseDay).Where(x => x is not null).Select(x => x!.Value).ToList() : [];
         var byMonthDay = r.TryGetValue("BYMONTHDAY", out var bmd) ? bmd.Split(',').Select(x => int.TryParse(x, out var n) ? n : 0).Where(n => n != 0).ToList() : [];
+        var byMonth = r.TryGetValue("BYMONTH", out var bm) ? bm.Split(',').Select(x => int.TryParse(x, out var n) ? n : 0).Where(n => n is >= 1 and <= 12).Distinct().ToList() : [];
+        var wkst = r.TryGetValue("WKST", out var ws) && ParseDay(ws) is { Item1: 0 } start ? start.Item2 : DayOfWeek.Monday;
+        var bySetPos = r.TryGetValue("BYSETPOS", out var bsp) ? bsp.Split(',').Select(x => int.TryParse(x, out var n) ? n : 0).Where(n => n != 0).ToList() : [];
 
         // work in the event's local wall-clock time
         var local = allDay || zone is null ? firstUtc : TimeZoneInfo.ConvertTimeFromUtc(firstUtc, zone);
@@ -178,14 +192,25 @@ public static class Ics
         {
             IEnumerable<DateTime> candidates = freq switch
             {
-                "DAILY" => [local.AddDays(period * interval)],
-                "WEEKLY" => WeekDays(local, period * interval, byDay),
+                // BYDAY limits a daily rule to those weekdays (Thunderbird's "every weekday")
+                "DAILY" => local.AddDays(period * interval) is var day && (byDay.Count == 0 || byDay.Any(b => b.Item2 == day.DayOfWeek)) ? [day] : [],
+                "WEEKLY" => WeekDays(local, period * interval, byDay, wkst),
                 "MONTHLY" => MonthDays(local, period * interval, byDay, byMonthDay),
-                "YEARLY" => [local.AddYears(period * interval)],
+                // BYMONTH (with BYDAY / BYMONTHDAY) picks days within those months: "second Sunday of May"
+                "YEARLY" when byMonth.Count > 0 => byMonth.SelectMany(m => MonthDays(local, period * interval * 12 + m - local.Month, byDay, byMonthDay)),
+                // AddYears turns 29 February into the 28th; RFC 5545 skips the invalid date (leap-day birthdays)
+                "YEARLY" => local.AddYears(period * interval) is var year && year.Day == local.Day ? [year] : [],
                 _ => period == 0 ? [local] : [],
             };
+            var set = candidates.OrderBy(x => x).ToList();
+            // BYSETPOS picks from each period's set: "the last weekday of the month" (Outlook) is BYDAY=MO,…,FR;BYSETPOS=-1
+            if (bySetPos.Count > 0)
+            {
+                var all = set.Distinct().ToList();
+                set = bySetPos.Select(p => p > 0 ? p - 1 : all.Count + p).Where(i => i >= 0 && i < all.Count).Distinct().Order().Select(i => all[i]).ToList();
+            }
             var any = false;
-            foreach (var l in candidates.OrderBy(x => x))
+            foreach (var l in set)
             {
                 any = true;
                 if (l < local) continue;
@@ -195,16 +220,17 @@ public static class Ics
                 if (++emitted > count) yield break;
                 yield return utc;
             }
-            if (!any && freq is not ("WEEKLY" or "MONTHLY")) yield break;
+            if (!any && freq is not ("DAILY" or "WEEKLY" or "MONTHLY" or "YEARLY")) yield break;
         }
     }
 
-    private static IEnumerable<DateTime> WeekDays(DateTime first, int weeks, List<(int Nth, DayOfWeek Day)> byDay)
+    /// <param name="wkst">The day weeks start on (RRULE WKST, Monday by default); it decides which days share a week with INTERVAL.</param>
+    private static IEnumerable<DateTime> WeekDays(DateTime first, int weeks, List<(int Nth, DayOfWeek Day)> byDay, DayOfWeek wkst = DayOfWeek.Monday)
     {
-        var weekStart = first.Date.AddDays(-(((int)first.DayOfWeek + 6) % 7)).AddDays(weeks * 7); // Monday
+        var weekStart = first.Date.AddDays(-(((int)first.DayOfWeek - (int)wkst + 7) % 7)).AddDays(weeks * 7);
         if (byDay.Count == 0) { yield return first.AddDays(weeks * 7); yield break; }
         foreach (var (_, day) in byDay)
-            yield return weekStart.AddDays(((int)day + 6) % 7) + first.TimeOfDay;
+            yield return weekStart.AddDays(((int)day - (int)wkst + 7) % 7) + first.TimeOfDay;
     }
 
     private static IEnumerable<DateTime> MonthDays(DateTime first, int months, List<(int Nth, DayOfWeek Day)> byDay, List<int> byMonthDay)
@@ -244,7 +270,7 @@ public static class Ics
     }
 
     /// <summary>DTSTART-style value to UTC. Dates (all-day) stay at midnight, without a zone.</summary>
-    private static DateTime? ToUtc(Prop p, out bool allDay)
+    private static DateTime? ToUtc(Prop p, out bool allDay, TimeZoneInfo? local = null)
     {
         var v = p.Value.Trim();
         allDay = v.Length == 8 || p.Params.GetValueOrDefault("VALUE") == "DATE";
@@ -255,7 +281,7 @@ public static class Ics
         if (!DateTime.TryParseExact(v.TrimEnd('Z'), "yyyyMMdd'T'HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var t)) return null;
         if (utc) return DateTime.SpecifyKind(t, DateTimeKind.Utc);
         var zone = p.Params.TryGetValue("TZID", out var tz) ? FindZone(tz) : null;
-        return zone is null ? DateTime.SpecifyKind(t, DateTimeKind.Local).ToUniversalTime() : SafeToUtc(t, zone);
+        return SafeToUtc(t, zone ?? local ?? TimeZoneInfo.Local);
     }
 
     private static DateTime SafeToUtc(DateTime local, TimeZoneInfo zone)
@@ -329,5 +355,21 @@ public static class Ics
         return new Prop(head[0].ToUpperInvariant(), pars, line[(colon + 1)..]);
     }
 
-    private static string Unescape(string s) => s.Replace("\\n", " ").Replace("\\N", " ").Replace("\\,", ",").Replace("\\;", ";").Replace("\\\\", "\\").Trim();
+    /// <summary>TEXT escapes (\\ \; \, \n \N), read left to right so "\\n" stays a backslash and an "n".</summary>
+    private static string Unescape(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] != '\\' || i + 1 == s.Length) { sb.Append(s[i]); continue; }
+            var next = s[++i];
+            switch (next)
+            {
+                case 'n' or 'N': sb.Append(' '); break;
+                case '\\' or ',' or ';': sb.Append(next); break;
+                default: sb.Append('\\').Append(next); break; // not an escape: keep both characters
+            }
+        }
+        return sb.ToString().Trim();
+    }
 }

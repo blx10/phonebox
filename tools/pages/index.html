@@ -58,8 +58,9 @@ footer { margin-top: 40px; text-align: center; color: var(--muted); font-size: 1
     <h1>PhoneBox</h1>
     <a class="gh" href="https://github.com/ersinkoc/phonebox">★ <span>GitHub</span></a>
   </header>
-  <p class="lead">Turn an old Android phone into a <b>desk panel for your computer</b> (Windows, Linux or macOS): 55 widgets, a visual layout editor,
-    AI coding sessions and quotas, music, webhooks. This is the real panel running in your browser with made-up data — swipe it, tap it.</p>
+  <p class="lead">Turn an old Android phone into a <b>desk panel for your computer</b> (Windows, Linux or macOS): {{widgets}} widgets, a visual layout editor,
+    AI coding sessions and quotas, music, a Control Deck, webhooks and rules. This is the real panel of PhoneBox {{version}} running in your browser
+    with made-up data — swipe it, tap it.</p>
 
   <div class="stage"><div class="phone"><div class="screen"><iframe id="panel" src="panel/" title="PhoneBox panel"></iframe></div></div></div>
 
@@ -74,9 +75,10 @@ footer { margin-top: 40px; text-align: center; color: var(--muted); font-size: 1
   <p class="hint">Changes you make in the layout editor show up here right away. Everything stays in your browser.</p>
 
   <div class="grid">
-    <div class="card"><h3>113 widgets, 30 templates</h3><p>Smart Stack, clocks, weather, calendars, media, gauges, charts, processes, Docker, OBS, Home Assistant, rules, timers, checklists, markets… on a 12 × 6 grid, as many pages as you like.</p></div>
-    <div class="card"><h3>AI coding at a glance</h3><p>Claude and Codex quotas with a burn-rate forecast, every Claude Code session, and Allow / Deny for permission prompts right on the phone.</p></div>
-    <div class="card"><h3>Webhooks</h3><p>Scripts, CI and Home Assistant push values and notifications with one <code>curl</code>; the panel can switch pages on demand.</p></div>
+    <div class="card"><h3>{{widgets}} widgets, {{templates}} templates</h3><p>Smart Stack, clocks, weather, calendars, media, gauges, charts, processes, Docker / Podman, OBS, Home Assistant, timers, checklists, markets… on a 12 × 6 grid, as many pages as you like. Every template is a page in this demo.</p></div>
+    <div class="card"><h3>AI coding at a glance</h3><p>Claude, Codex and Antigravity quotas with a burn-rate forecast, Claude Code and Codex sessions, GitHub reviews, and Allow / Deny for Claude Code's permission prompts right on the phone.</p></div>
+    <div class="card"><h3>Control Deck</h3><p>App and device volume, microphone, media, OBS, tasks, dev servers and display brightness as touch controls. The phone sends IDs only; commands stay on the computer. The native audio and display controls are Windows-only.</p></div>
+    <div class="card"><h3>Webhooks and rules</h3><p>Scripts, CI and Home Assistant push values and notifications with one <code>curl</code>; rules switch pages calmly when a call, music or a waiting AI session needs the screen.</p></div>
     <div class="card"><h3>USB or Wi-Fi, no cloud</h3><p>Over the USB cable, or over Wi-Fi / Tailscale with a pinned certificate and a key. Nothing leaves your machine.</p></div>
   </div>
 
@@ -84,7 +86,7 @@ footer { margin-top: 40px; text-align: center; color: var(--muted); font-size: 1
     <p>Install: <code>./scripts/install.sh --apk</code> (Linux, macOS) or <code>.\scripts\install.ps1 -Apk</code> (Windows) —
       see the <a href="https://github.com/ersinkoc/phonebox#quick-start">quick start</a>.</p>
   </div>
-  <footer>MIT licensed · <a href="https://github.com/ersinkoc/phonebox">github.com/ersinkoc/phonebox</a></footer>
+  <footer>PhoneBox {{version}} · MIT licensed · <a href="https://github.com/ersinkoc/phonebox">github.com/ersinkoc/phonebox</a> · <a href="https://github.com/ersinkoc/phonebox/blob/main/CHANGELOG.md">changelog</a></footer>
 </div>
 
 <script>

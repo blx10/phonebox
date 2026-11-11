@@ -1,0 +1,157 @@
+using System.Globalization;
+using System.Net;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
+using PhoneBox.Agent;
+using Xunit;
+
+/// <summary>Regression tests for the monitor defects found in the 0.9.4 audit.</summary>
+public sealed class MonitorAuditTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "phonebox-audit094-" + Guid.NewGuid().ToString("N"));
+    public MonitorAuditTests() => Directory.CreateDirectory(_dir);
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    private ConfigStore Config(object cfg)
+    {
+        var path = Path.Combine(_dir, $"config-{Guid.NewGuid():N}.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(cfg));
+        return new ConfigStore(path);
+    }
+
+    // ------------------------------------------------------------------ 1. calendars sharing a name
+    [Fact]
+    public async Task CalendarsWithTheSameNameDoNotMultiplyEventsWhileAFeedFails()
+    {
+        using var server = TestPorts.Listen();
+        var url = server.Prefixes.Single();
+        var healthy = true;
+        var day = DateTime.UtcNow.Date.AddDays(1);
+        string Feed(string title) => "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:" + title + $"\r\nDTSTART:{day:yyyyMMdd}T090000Z\r\nDTEND:{day:yyyyMMdd}T093000Z\r\nSUMMARY:" + title + "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        var loop = Task.Run(async () =>
+        {
+            while (server.IsListening)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await server.GetContextAsync(); } catch { return; }
+                if (!healthy) ctx.Response.StatusCode = 503;
+                else await ctx.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(Feed(ctx.Request.Url!.AbsolutePath.Trim('/'))));
+                ctx.Response.Close();
+            }
+        });
+
+        // "Add calendar" in the settings creates entries with an empty name, so two unnamed feeds are the normal case
+        var cfg = Config(new { calendars = new[] { new { name = "", url = url + "work" }, new { name = "", url = url + "home" } } });
+        var monitor = new CalendarMonitor(cfg, NullLogger<CalendarMonitor>.Instance);
+        var refresh = typeof(CalendarMonitor).GetMethod("Refresh", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Task Refresh() => (Task)refresh.Invoke(monitor, [cfg.Get().Calendars, CancellationToken.None])!;
+
+        await Refresh();
+        Assert.Equal(["home", "work"], monitor.Snapshot().Events.Select(e => e.Title).Order());
+
+        healthy = false;                       // the network drops (laptop asleep, Wi-Fi down) for half an hour
+        for (var i = 0; i < 3; i++) await Refresh();
+        server.Stop();
+
+        Assert.Equal(2, monitor.Snapshot().Errors.Count);
+        Assert.Equal(2, monitor.Snapshot().Events.Count);
+        Assert.Equal(["home", "work"], monitor.Snapshot().Events.Select(e => e.Title).Order());
+    }
+
+    // ------------------------------------------------------------------ 2. charge guard
+    [Fact]
+    public async Task ChargeGuardKeepsTryingToRestoreThePowerAfterAFailedSwitchOn()
+    {
+        using var server = TestPorts.Listen();
+        var plugReachable = true;
+        var calls = new List<string>();
+        var loop = Task.Run(async () =>
+        {
+            while (server.IsListening)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await server.GetContextAsync(); } catch { return; }
+                lock (calls) calls.Add(ctx.Request.Url!.AbsolutePath);
+                if (!plugReachable) ctx.Response.StatusCode = 503;
+                ctx.Response.Close();
+            }
+        });
+        var cfg = Config(new
+        {
+            homeAssistant = new { url = server.Prefixes.Single().TrimEnd('/'), token = "secret" },
+            charge = new { enabled = true, min = 50, max = 80, method = "ha", entity = "switch.phone_plug" },
+        });
+        var guard = new ChargeGuard(cfg, new HomeAssistant(cfg, NullLogger<HomeAssistant>.Instance),
+            new PushStore(NullLogger<PushStore>.Instance, Path.Combine(_dir, "data.json")), new AudioControl(), NullLogger<ChargeGuard>.Instance);
+        var charge = cfg.Get().Charge;
+
+        Assert.Null(await guard.Switch(charge, "off"));        // 80 % reached: the plug is switched off
+        plugReachable = false;                                  // Home Assistant restarts / the network drops
+        Assert.NotNull(await guard.Switch(charge, "on"));      // the phone went silent: "on" is attempted and fails
+        server.Stop();
+
+        var status = JsonSerializer.SerializeToElement(guard.Status());
+        var power = status.GetProperty("power").GetString();
+        var switchedAt = status.GetProperty("switchedAt").GetInt64();
+        // the plug is still off, so the guard has to keep asking for "on" (phone silent: r == null)
+        Assert.Equal("on", ChargeGuard.Decide(charge, null, switchedAt + 30_000, power, switchedAt));
+    }
+
+    // ------------------------------------------------------------------ 3. CodexBar texts under a comma-decimal culture
+    [Fact]
+    public void CodexBarTextsDoNotDependOnTheWindowsLocale()
+    {
+        var before = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("tr-TR");
+            var p = CodexBar.Parse("""
+                [{"provider":"codex","usage":{"primary":{"usedPercent":12,"windowMinutes":90},"updatedAt":"2026-11-11T10:00:00Z"},"credits":{"remaining":12.5}}]
+                """).Single();
+            Assert.Equal("Credits: 12.5", p.Extra);
+            Assert.Equal("1.5-hour", p.Limits.Single().Label);
+        }
+        finally { CultureInfo.CurrentCulture = before; }
+    }
+
+    // ------------------------------------------------------------------ 4. a Claude session file whose PID now belongs to another process
+    [Fact]
+    public void ClaudeSessionFileOfAReusedPidIsNotShownAsALiveSession()
+    {
+        if (!OperatingSystem.IsWindows()) return;   // procStart is a FILETIME string on Windows ("pidDomain":"win32:...")
+        var sessions = Directory.CreateDirectory(Path.Combine(_dir, ".claude", "sessions")).FullName;
+        var pid = Environment.ProcessId;            // a live process that is not the Claude Code session that wrote the file
+        // Claude Code records the start time of its own process: this session's process started a week before the one that has the PID now
+        var started = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime().AddDays(-7);
+        File.WriteAllText(Path.Combine(sessions, pid + ".json"), JsonSerializer.Serialize(new
+        {
+            pid, sessionId = "s1", cwd = @"D:\work\demo", startedAt = new DateTimeOffset(started).ToUnixTimeMilliseconds() + 2000,
+            procStart = started.ToFileTimeUtc().ToString(CultureInfo.InvariantCulture), pidDomain = "win32:white", status = "waiting", waitingFor = "permission",
+        }));
+        Assert.Empty(SessionMonitor.ReadClaude(_dir));
+    }
+
+    // ------------------------------------------------------------------ 6. a quota window that has reset since the last reading
+    [Fact]
+    public void QuotaLimitWhoseWindowHasResetIsNotReportedAsUsedUp()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        // Codex: the last rollout record said 100 % of the 5-hour window, resetting two hours ago; nothing was written since
+        // (nobody runs Codex while the panel says the limit is reached)
+        var codex = new QuotaProvider("codex", "Codex", "Plus",
+            [new QuotaLimit("5-hour", 100, now - 2 * 3600_000, 18000, "critical"), new QuotaLimit("Weekly", 40, now + 3 * 86400_000L, 604800, "normal")],
+            "Limit reached", now - 7 * 3600_000, null);
+        var monitor = new QuotaMonitor(NullLogger<QuotaMonitor>.Instance);
+        typeof(QuotaMonitor).GetField("_codex", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(monitor, codex);
+
+        var shown = monitor.Snapshot().Single(p => p.Id == "codex");
+        var session = shown.Limits.Single(l => l.Label == "5-hour");
+        Assert.Equal(0, session.Percent);                         // the window started over at its reset time
+        Assert.DoesNotContain("Limit reached", shown.Extra ?? "");
+        Assert.Equal(40, shown.Limits.Single(l => l.Label == "Weekly").Percent);
+    }
+
+    // ------------------------------------------------------------------ 5. Windows time zone names without ICU (run with DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1)
+}

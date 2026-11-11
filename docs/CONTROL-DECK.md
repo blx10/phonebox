@@ -17,11 +17,11 @@ This document tracks implementation and evidence; a catalog entry or demo is not
 | Development / automation | Build/test tasks, dev servers, services, Docker, GitHub workflows, scripts, Home Assistant scenes | Implemented, reusing existing Docker/HA widgets; owned-process stop test preserves unrelated processes; workflow dispatch and service mutations require configured targets |
 | Advanced audio / protocols | Application routing, external mixer, MIDI, OSC, PC-audio listening on the phone | Implemented with explicit dependencies/opt-ins; MIDI/OSC encoding tested; external hardware, Voicemeeter and listening playback require separate live validation |
 | Product integration | Widget catalog/options, setup editor, templates, phone/LAN proxy, demo, documentation | 113 widgets and 30 templates; private settings/token routes excluded from LAN; 40 browser tests pass, including settings persistence and portrait/landscape layout |
-| Validation | Unit/API tests, browser interactions, native Windows checks, Android lint/build, release/installed proof | 245 .NET tests, 40 browser tests, Android lintDebug/assembleDebug, both .NET target builds and installer regression checks pass; release/installation require the published-artifact checks below |
+| Validation | Unit/API tests, browser interactions, native Windows checks, Android lint/build, release/installed proof | 245 .NET tests and 40 browser tests at 0.8.0, Android lintDebug/assembleDebug, both .NET target builds and installer regression checks pass; release/installation require the published-artifact checks below |
 
 ## Local verification (2026-11-10)
 
-- Both .NET targets compile with zero warnings and zero errors; the full .NET suite passes 245 tests. An earlier
+- Both .NET targets compile with zero warnings and zero errors; the full .NET suite passed 245 tests at 0.8.0. An earlier
   concurrent build run hit the existing PowerShell child-startup timeout test; its isolated rerun and the final full
   suite passed. The test was not skipped or weakened. OBS tests also cover the explicit loading response during slow discovery and wait for the measured controls before asserting their contents.
 - HTTP fixtures serialize port allocation/start and use distinct ports; a sixteen-listener contention test covers parallel startup. Fixtures close their listener once: calling Stop followed by Close can rebind an already removed endpoint in the Unix HttpListener implementation. Owned-process fixture cleanup waits for bounded Windows descendant handle teardown.
@@ -78,7 +78,7 @@ radio targets must be direct Media Foundation-compatible HTTP(S) audio streams, 
 | Application routing | Install [SoundVolumeView](https://www.nirsoft.net/utils/sound_volume_view.html), set its executable path and configure process/output ID bindings | Successful helper exit is shown as **Routing requested**; it is not independent proof that a running application migrated its stream. The helper is not bundled. |
 | Virtual mixer | Install/start Voicemeeter and set the path to its matching 64-bit Remote DLL | Measured Strip/Bus gain and toggle values; missing engine/DLL displays unavailable. Third-party binaries are not bundled. |
 | MIDI | Choose an actual output port ID | Wire-order channel message bytes, e.g. `B0 07 {value}`. Values 0–127. Note pads send note-off after 120 ms. SysEx is excluded. |
-| OSC | Configure host:port and address such as `/volume` | Sends one float argument using network byte order. UDP delivery is not an acknowledgment from the receiving device. |
+| OSC | Configure host:port and address such as `/volume` | Sends the binding's whole-number value as one float argument using network byte order. UDP delivery is not an acknowledgment from the receiving device. |
 | GitHub workflows | Install/sign in to `gh`; configure owner/repo, workflow filename and optional ref | Dispatch success means accepted by GitHub CLI, not a completed workflow. |
 | Services | Configure the actual Windows service name and start/stop/restart | Reads real service state; restart waits for stop/start state transitions. Permission failures are reported. |
 | Docker / Home Assistant | Configure their existing integrations and widget control permissions | Existing container and entity/scene controls remain available; no duplicate daemon or account is introduced. |

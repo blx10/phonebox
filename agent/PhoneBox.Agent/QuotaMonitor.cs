@@ -36,10 +36,24 @@ public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : Background
     private long _nextAntigravity;
     private volatile IReadOnlyList<QuotaProvider> _external = [];
 
-    public IReadOnlyList<QuotaProvider> Snapshot() => new[] { "claude", "codex", "antigravity" }
-        .Select(id => CodexBar.Select(id == "claude" ? _claude : id == "codex" ? _codex : _antigravity,
-            _external.FirstOrDefault(p => p.Id == id), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
-        .OfType<QuotaProvider>().ToList();
+    public IReadOnlyList<QuotaProvider> Snapshot()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return new[] { "claude", "codex", "antigravity" }
+            .Select(id => CodexBar.Select(id == "claude" ? _claude : id == "codex" ? _codex : _antigravity, _external.FirstOrDefault(p => p.Id == id), now))
+            .OfType<QuotaProvider>().Select(p => Rolled(p, now)).ToList();
+    }
+
+    /// <summary>A window whose reset time has passed started over: the last reading (kept while the tool is not used) no longer applies.</summary>
+    private static QuotaProvider Rolled(QuotaProvider p, long now)
+    {
+        if (!p.Limits.Any(l => l.ResetsAt is { } r && r <= now)) return p;
+        var limits = p.Limits.Select(l => l.ResetsAt is { } r && r <= now ? l with { Percent = 0, ResetsAt = null, Severity = "normal" } : l).ToList();
+        const string reached = "Limit reached";
+        var extra = p.Extra is { } x && x.StartsWith(reached, StringComparison.Ordinal) && !limits.Any(l => l.Percent >= 100)
+            ? (x.Length > reached.Length + 3 ? x[(reached.Length + 3)..] : null) : p.Extra;
+        return p with { Limits = limits, Extra = extra };
+    }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -92,7 +106,10 @@ public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : Background
     private async Task<bool> RefreshClaude(CancellationToken ct)
     {
         var path = Path.Combine(Home, ".claude", ".credentials.json");
-        string? json = File.Exists(path) ? await File.ReadAllTextAsync(path, ct) : null;
+        string? json = null;
+        // Claude Code may be rewriting the file right now: try again on the next round instead of ending the service
+        try { if (File.Exists(path)) json = await File.ReadAllTextAsync(path, ct); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
 #if !WINDOWS
         // macOS: Claude Code stores the credentials in the login Keychain instead of a file (read-only access).
         if (json is null && OperatingSystem.IsMacOS()) json = Sh.Run("security", "find-generic-password", "-s", "Claude Code-credentials", "-w")?.Trim();

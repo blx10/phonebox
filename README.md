@@ -38,7 +38,17 @@ the pages in a visual editor on the PC: **113 widgets**, **30 templates**, as ma
 [Updates](#updates) · [How it works](#how-it-works) · [Security](#security--privacy) · [FAQ](#faq--troubleshooting) ·
 [Development](#development)
 
-## New in 0.7.3
+## Recent highlights
+
+The [changelog](CHANGELOG.md) lists every release. Some of the larger additions:
+
+### Control Deck, appearance and Podman (0.8 – 0.9)
+
+58 [Control Deck](docs/CONTROL-DECK.md) widgets (audio, media, OBS, tasks, displays), optional
+[appearance](docs/APPEARANCE.md) presets for the panel, pages and widgets, Podman containers, and pages that wrap
+around when you swipe past the last one.
+
+### Android 9 and 10 (0.7.3)
 
 Fixes an immediate launch crash on Android 9 and 10. Full-screen mode now uses the compatible immersive API on
 these versions; Android 11+ keeps the existing behavior. Android API compatibility lint now blocks CI and releases.
@@ -59,7 +69,7 @@ These screenshots use made-up demo data. See the [changelog](CHANGELOG.md) for a
 
 ## Quick start
 
-**[Download PhoneBox 0.7.3](https://github.com/ersinkoc/phonebox/releases/tag/v0.7.3)** — signed Android APK and
+**[Download the latest PhoneBox release](https://github.com/ersinkoc/phonebox/releases/latest)** — signed Android APK and
 agents for Windows x64, Linux x64/ARM64 and macOS Apple Silicon/Intel. Agent archives need the matching .NET 10
 runtime (Desktop Runtime on Windows). The release includes SHA-256 checksums and build provenance.
 Existing users can update from Settings; existing layouts and pairing settings are retained.
@@ -143,7 +153,7 @@ push-to-talk, audio profiles, media controls, soundboard, window and system cont
 development tasks, MIDI and OSC. Six new templates provide starting layouts; existing layouts are retained.
 
 Open **Settings → General → Control Deck** to define computer-side bindings and capture audio profiles. Add the
-matching widgets in Pages. Executable shortcuts and macros are configured in Deck first; phone requests contain
+matching widgets in Pages. Executable shortcuts and macros are configured in Shortcuts first; phone requests contain
 only configured IDs. PC audio listening and hold-to-confirm power buttons require separate desktop opt-ins.
 
 Spotify queue, library and playlist controls need a Spotify Developer Client ID and a connection through the
@@ -241,7 +251,7 @@ Double-click the tray icon on Windows (or open <http://127.0.0.1:8765>):
   their state on the phone (mute does by itself, others from a pushed value).
 - **Webhooks**: the webhook key, copy-paste examples, test buttons and the values pushed so far.
 - **General**: weather location search; calendars (ICS links from Google, Outlook or iCloud), Home Assistant and OBS
-  connections; night mode; theme and accent colour, orientation (landscape, portrait or both), clock seconds,
+  connections; night mode; theme and accent colour, orientation (landscape, portrait or follow the phone), clock seconds,
   vibration, volume-key paging and the phone's sensors (brightness that follows the room, the night screen when the
   room goes dark, wave to wake it); [page switching](#rules) (home page, countdown, back home after);
   kiosk options (screen pinning, the panel as the phone's home screen so it starts after a reboot, keep the phone

@@ -36,7 +36,7 @@ internal static class CodexBar
                 if (Prop(window, "isSyntheticPlaceholder").ValueKind == JsonValueKind.True || Num(window, "usedPercent") is not { } percent) return;
                 var minutes = Num(window, "windowMinutes");
                 var title = Str(labels, label) ?? (label is "primary" or "secondary" or "tertiary"
-                    ? minutes switch { 300 => "5-hour session", 10080 => "Weekly", > 0 => $"{minutes / 60:0.#}-hour", _ => label switch { "primary" => "Primary limit", "secondary" => "Secondary limit", _ => "Additional limit" } } : label);
+                    ? minutes switch { 300 => "5-hour session", 10080 => "Weekly", > 0 => string.Create(CultureInfo.InvariantCulture, $"{minutes / 60:0.#}-hour"), _ => label switch { "primary" => "Primary limit", "secondary" => "Secondary limit", _ => "Additional limit" } } : label);
                 percent = Math.Max(0, percent);
                 limits.Add(new QuotaLimit(title, percent, Date(Str(window, "resetsAt")),
                     minutes is > 0 and <= 525600 ? (long)(minutes.Value * 60) : null,
@@ -50,7 +50,7 @@ internal static class CodexBar
                 foreach (var w in extra.EnumerateArray()) Add(Prop(w, "window"), Str(w, "title") ?? "Additional limit");
             var plan = Str(usage, "loginMethod") ?? Str(Prop(usage, "planObservation"), "rawPlan") ?? name;
             var credits = Num(Prop(item, "credits"), "remaining");
-            providers.Add(new QuotaProvider(id, name, plan, limits, credits is { } c ? $"Credits: {c:0.##}" : null,
+            providers.Add(new QuotaProvider(id, name, plan, limits, credits is { } c ? string.Create(CultureInfo.InvariantCulture, $"Credits: {c:0.##}") : null,
                 Date(Str(usage, "updatedAt")) ?? Date(Str(item, "updatedAt")) ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 message ?? (limits.Count == 0 ? "CodexBar returned no measured limits" : null), Source: "codexbar"));
         }

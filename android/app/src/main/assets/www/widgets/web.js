@@ -26,7 +26,7 @@ W.hackernews = {
           try { host = s.u ? new URL(s.u).hostname.replace(/^www\./, '') : 'news.ycombinator.com'; } catch (_) {}
           return h('div', 'hn-i', h('span', 'hn-r', i + 1), h('div', 'hn-b', h('div', 'hn-t', s.t), h('div', 'hn-m', `▲ ${s.s} · ${s.c} comments · ${host}`)));
         }));
-      } catch (_) { if (!list.querySelector('.hn-i')) list.replaceChildren(h('div', 'empty', 'Offline')); }
+      } catch (_) { if (!list.querySelector('.hn-i')) list.replaceChildren(h('div', 'empty', 'Offline')); return false; }
     });
     return { update: load };
   },
@@ -53,7 +53,7 @@ W.exchange = {
           requestAnimationFrame(() => sparkLine(c, series, last >= series[0] ? '#22c55e' : '#ef4444'));
           return row;
         }));
-      } catch (_) { list.replaceChildren(h('div', 'empty', 'Rates unavailable')); }
+      } catch (_) { list.replaceChildren(h('div', 'empty', 'Rates unavailable')); return false; }
     });
     return { update: load };
   },
@@ -75,7 +75,7 @@ W.crypto = {
           requestAnimationFrame(() => sparkLine(cv, series, (c.price_change_percentage_24h ?? 0) >= 0 ? '#22c55e' : '#ef4444'));
           return h('div', 'fx-i', h('b', null, (c.symbol || '').toUpperCase()), h('span', 'fx-v', fmtNum(c.current_price)), pctSpan(c.price_change_percentage_24h ?? 0), cv);
         }));
-      } catch (_) { list.replaceChildren(h('div', 'empty', 'Prices unavailable')); }
+      } catch (_) { list.replaceChildren(h('div', 'empty', 'Prices unavailable')); return false; }
     });
     return { update: load };
   },

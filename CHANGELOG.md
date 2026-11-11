@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.9.4 — 2026-11-11
+
+A full audit of the agent, the panel, the settings page and the tooling. Every fix below has a regression test or a
+recorded proof.
+
+**Panel**
+- After the agent restarts (an update, a reboot) the panel no longer ignores its notifications, rule page switches
+  and Claude Code permission prompts until the new agent has sent as many events as the old one.
+- Timer and Pomodoro alarms go off on whatever page is showing, not only when their own page is open.
+- Control Deck widgets have their padding back (titles were cut off at the card's corner), faders show their level
+  on the track, and a fader keeps following the computer after a tap that did not move it. Ducking to 0 % works.
+- World clocks show the right time as soon as their page is visible again; a daily counter and the Pomodoro's
+  "today" count start over at midnight while the panel stays open; a counter, gauge or On air sign without saved
+  options behaves as the settings page shows it.
+- Web widgets (rates, prices, Hacker News, air quality) retry within a minute after a failed load. Back closes the
+  session details dialog. "now ago" reads "just now".
+- The phone no longer sends a slow POST (a container restart, a Home Assistant switch) a second time over Wi-Fi.
+
+**Agent**
+- Calendar: recurring events follow more of RFC 5545 (weekdays in a daily rule, "last Thursday of November",
+  week start, BYSETPOS, leap-day birthdays, escaped backslashes) and keep their local time across daylight saving.
+  Calendars that share a name no longer multiply their events while a feed is unreachable.
+- A quota window that has already reset is no longer shown as used up. CodexBar texts use a decimal point on every
+  Windows locale. A leftover Claude Code session file whose process ID was reused is not shown as a live session.
+- Rules: a pushed "OFF" / "False" / `{"value":"off"}` turns a push rule off, and "18:00-24:00" lasts all evening.
+- Battery care keeps trying to switch the power back on after a failed attempt.
+- A phone without the app is offered "Install the phone app" again, and no longer blocks the phones after it.
+- The settings page can save again after `config.json` was left unreadable by a hand edit; a `null` entry in the
+  settings is answered with a message instead of an error page. Pushed values reach `data.json` even while a
+  script pushes every second. Page, shortcut and rule ids keep the Turkish capital İ.
+- Control Deck: a folder shortcut is not mistaken for a running app; toggle shortcuts run their "off" command; a
+  task that cannot start says so; a sleep timer can be cancelled after its player closed and fades Store apps such
+  as Spotify; a Spotify timeout is reported instead of failing the request.
+- The Command widget's Linux / macOS command can be edited in the settings.
+
+**Settings page**
+- Multi-select options (chart series, quota providers, shortcut keys) keep every tick, not only the last one.
+- Text options of a widget inside a Smart Stack can be typed normally. Templates and stack children are saved with
+  the defaults the inspector shows. "Add a widget" finds room it used to miss. A rule switched to "show the page"
+  stores the page it displays.
+
+**Web demo and tooling**
+- The [live demo](https://ersinkoc.github.io/phonebox/) shows all 30 templates and answers like the agent: the
+  phone-facing settings without commands, working volume, media, process and Control Deck controls, the same
+  refusals and error texts. The landing page takes its widget and template counts and the version from the sources.
+- `install.ps1` stops when the build fails instead of starting the previous version; the APK installer reports
+  adb's real answer under Windows PowerShell 5.1.
+
 ## 0.9.3 — 2026-11-11
 
 - Support Podman for the containers widget ([#12](https://github.com/ersinkoc/phonebox/pull/12)). Parse Podman's JSON

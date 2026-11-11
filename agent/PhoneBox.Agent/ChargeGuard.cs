@@ -76,7 +76,8 @@ public sealed class ChargeGuard(ConfigStore config, HomeAssistant ha, PushStore 
             error = string.IsNullOrWhiteSpace(id) ? $"no shortcut set for power {action}" : Shortcuts.Run(config.Get(), id, log, push, audio);
         }
         else error = string.IsNullOrWhiteSpace(c.Entity) ? "no Home Assistant switch set" : await ha.SwitchAsync(c.Entity, action == "on");
-        _last = action;
+        // a failed "on" leaves the plug off: keep the old state so the next pass asks again (never leave the phone unpowered)
+        if (error is null || action == "off") _last = action;
         _lastAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         _error = error;
         if (error is null) log.LogInformation("charge guard: power {Action} (phone at {Level}%)", action, _report?.Level);

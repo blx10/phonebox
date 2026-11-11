@@ -343,7 +343,8 @@ W.onair = {
         const cam = (src === 'both' || src === 'camera') && !!p?.camera;
         const obs = D.state?.obs;
         const obsLive = (src === 'both' || src === 'obs') && !!obs && (obs.streaming || (obs.recording && !obs.recordPaused));
-        let pv = o.key ? D.push?.[o.key]?.data : null;
+        const pushKey = o.key ?? 'onair'; // the catalog's default; an emptied field means no pushed value
+        let pv = pushKey ? D.push?.[pushKey]?.data : null;
         if (pv && typeof pv === 'object' && 'value' in pv) pv = pv.value;
         const pushed = pv != null && pv !== false && pv !== 0 && !/^(|0|false|off|no)$/i.test(String(pv));
         const on = mic || cam || obsLive || pushed;

@@ -109,6 +109,38 @@ public sealed class AuditRegressionTests : IDisposable
         Assert.False(push.Snapshot().ContainsKey("onair"));
     }
 
+    [Theory]
+    [InlineData("on", true)]
+    [InlineData("off", false)]
+    [InlineData("OFF", false)]   // MQTT / Home Assistant style
+    [InlineData("False", false)] // PowerShell's $false as text
+    [InlineData("No", false)]
+    public void APushedOffValueDoesNotTurnAPushRuleOnInAnyCase(string body, bool on)
+    {
+        var (engine, push, write) = Rules();
+        write(OnAir("TV", "push", "tv"));
+        push.Set("tv", PushStore.ParseValue(body), null);
+        engine.Evaluate();
+        Assert.Equal(on, engine.Active().Contains("meeting"));
+        // the same key read by a toggle shortcut agrees
+        Assert.Equal(on, Shortcuts.State(new Shortcut { Id = "s", StateKey = "tv" }, push, null));
+    }
+
+    [Theory]
+    [InlineData("""{"value":"on","sub":"living room"}""", true)]
+    [InlineData("""{"title":"Sensor"}""", true)]                    // no value: an object still counts as on
+    [InlineData("""{"value":"off","sub":"living room"}""", false)]  // README › Webhooks payload shape
+    [InlineData("""{"value":false}""", false)]
+    [InlineData("""{"value":0,"unit":"W"}""", false)]
+    public void APushRuleJudgesAJsonPayloadByItsValue(string json, bool on)
+    {
+        var (engine, push, write) = Rules();
+        write(OnAir("TV", "push", "tv"));
+        push.Set("tv", JsonDocument.Parse(json).RootElement, null);
+        engine.Evaluate();
+        Assert.Equal(on, engine.Active().Contains("meeting"));
+    }
+
     // ---------------------------------------------------------------- F8: command widgets and background processes
 
     [Fact]

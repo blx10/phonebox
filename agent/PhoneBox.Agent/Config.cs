@@ -335,11 +335,12 @@ public sealed partial class ConfigStore(string path)
     private readonly Lock _lock = new();
     private AgentConfig _config = Normalize(new AgentConfig());
     private DateTime _stamp = DateTime.MinValue;
+    private DateTime _seen = DateTime.MinValue; // write time of the file as last looked at, readable or not
 
     public string Path => path;
 
     /// <summary>Version stamp (file write time) so the phone can notice changes.</summary>
-    public long Version { get { Get(); return _stamp.Ticks; } }
+    public long Version { get { Get(); return _seen.Ticks; } }
 
     public AgentConfig Get()
     {
@@ -348,6 +349,7 @@ public sealed partial class ConfigStore(string path)
             try
             {
                 var stamp = File.GetLastWriteTimeUtc(path);
+                _seen = stamp;
                 if (stamp != _stamp)
                 {
                     _config = Normalize(JsonSerializer.Deserialize<AgentConfig>(File.ReadAllText(path), ReadOpts) ?? new());
@@ -380,7 +382,7 @@ public sealed partial class ConfigStore(string path)
         foreach (var s in cfg.Shortcuts)
             if (string.IsNullOrWhiteSpace(s.Cmd)) return $"Shortcut '{s.Label}' has no command";
         if (cfg.Weather.Lat is < -90 or > 90 || cfg.Weather.Lon is < -180 or > 180) return "Invalid weather location";
-        if (!HhMm().IsMatch(cfg.Night.Start) || !HhMm().IsMatch(cfg.Night.End)) return "Night mode times must be in HH:MM format";
+        if (!HhMm().IsMatch(cfg.Night.Start ?? "") || !HhMm().IsMatch(cfg.Night.End ?? "")) return "Night mode times must be in HH:MM format";
 
         lock (_lock)
         {
@@ -391,7 +393,7 @@ public sealed partial class ConfigStore(string path)
             if (File.Exists(path)) File.Copy(path, path + ".bak", overwrite: true);
             File.Move(tmp, path, overwrite: true);
             _config = cfg;
-            _stamp = File.GetLastWriteTimeUtc(path);
+            _stamp = _seen = File.GetLastWriteTimeUtc(path);
         }
         return null;
     }
@@ -433,7 +435,8 @@ public sealed partial class ConfigStore(string path)
         c.Pages = NormalizePages(c.Pages);
 
         var used = new HashSet<string>();
-        foreach (var s in c.Shortcuts ??= [])
+        c.Shortcuts = (c.Shortcuts ?? []).Where(s => s is not null).ToList(); // "shortcuts": [null] in a hand-written file
+        foreach (var s in c.Shortcuts)
         {
             s.Label = s.Label?.Trim() ?? "";
             s.Icon = IconText.Repair(s.Icon);
@@ -444,7 +447,7 @@ public sealed partial class ConfigStore(string path)
             s.Id = unique;
             if (string.IsNullOrWhiteSpace(s.Args)) s.Args = null;
             if (string.IsNullOrWhiteSpace(s.Cwd)) s.Cwd = null;
-            s.Steps = s.Steps?.Select(x => x.Trim()).Where(x => x.Length > 0).Take(50).ToList();
+            s.Steps = s.Steps?.Where(x => x is not null).Select(x => x.Trim()).Where(x => x.Length > 0).Take(50).ToList();
             if (s.Steps is { Count: 0 }) s.Steps = null;
             if (string.IsNullOrWhiteSpace(s.StateKey)) s.StateKey = null;
             if (string.IsNullOrWhiteSpace(s.OffCmd)) s.OffCmd = null;
@@ -524,7 +527,7 @@ public sealed partial class ConfigStore(string path)
             var widgets = new List<WidgetConfig>();
             foreach (var w in p.Widgets ?? [])
             {
-                if (w is null || !Catalog.IsWidget(w.Type)) continue;
+                if (w?.Type is null || !Catalog.IsWidget(w.Type)) continue;
                 w.Appearance?.Normalize(widget: true);
                 var (minW, minH) = Catalog.MinSize(w.Type);
                 w.W = Math.Clamp(w.W, Math.Min(minW, Catalog.Cols), Catalog.Cols);
@@ -606,8 +609,9 @@ public sealed partial class ConfigStore(string path)
         Save(JsonSerializer.Serialize(c, WriteOpts), version);
     }
 
+    // ToLowerInvariant keeps the Turkish capital İ (U+0130) as it is, so it is mapped by hand like the other letters
     private static string Slug(string s) => NonSlug().Replace(s.ToLowerInvariant()
-        .Replace('ı', 'i').Replace('ğ', 'g').Replace('ü', 'u').Replace('ş', 's').Replace('ö', 'o').Replace('ç', 'c'), "-").Trim('-');
+        .Replace('İ', 'i').Replace('ı', 'i').Replace('ğ', 'g').Replace('ü', 'u').Replace('ş', 's').Replace('ö', 'o').Replace('ç', 'c'), "-").Trim('-');
 
     [GeneratedRegex("[^a-z0-9]+")]
     private static partial Regex NonSlug();

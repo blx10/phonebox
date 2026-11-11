@@ -4,7 +4,7 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ['android/app/src/main/assets/www/**', 'agent/PhoneBox.Agent/settings.html', 'agent/PhoneBox.Agent/*.json', 'tools/pages/**', '.github/workflows/pages.yml']
+    paths: ['android/app/src/main/assets/www/**', 'agent/PhoneBox.Agent/settings.html', 'agent/PhoneBox.Agent/*.json', 'agent/PhoneBox.Agent/PhoneBox.Agent.csproj', 'tools/pages/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:

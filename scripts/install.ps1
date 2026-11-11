@@ -33,6 +33,7 @@ Start-Sleep -Milliseconds 500
 Write-Host "==> Publishing agent to $app"
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET 10 SDK is required: winget install Microsoft.DotNet.SDK.10' }
 dotnet publish (Join-Path $root 'agent\PhoneBox.Agent') -c Release -f net10.0-windows10.0.19041.0 -o $app --nologo -v q --disable-build-servers
+if ($LASTEXITCODE) { throw "dotnet publish failed (exit code $LASTEXITCODE); the installed agent was not updated" }
 if (-not (Test-Path $exe)) { throw "publish failed: $exe not found" }
 
 # Leftover shortcut from the pre-PhoneBox "DeskAgent" prototype.
@@ -68,7 +69,7 @@ if ($Apk) {
         if ($BuildApk -or -not $apkFile -or $newestSource.LastWriteTime -gt $apkFile.LastWriteTime) {
             Write-Host '==> Building the APK'
             Push-Location (Join-Path $root 'android')
-            try { .\gradlew.bat assembleRelease --console=plain -q } finally { Pop-Location }
+            try { .\gradlew.bat assembleRelease --console=plain -q; if ($LASTEXITCODE) { throw "the Android build failed (exit code $LASTEXITCODE); the phone app was not updated" } } finally { Pop-Location }
             $apkFile = Get-Item $built
         }
     }

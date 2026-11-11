@@ -212,7 +212,7 @@ W.gauge = {
         if (!s) return;
         const raw = m.pct ? m.pct(s) : m.val(s);
         const p = raw == null ? 0 : (raw / (m.pct ? 100 : m.max(s))) * 100;
-        const warn = o.metric.includes('temp') ? (raw > 85 ? '#ef4444' : raw > 75 ? '#f59e0b' : '') : (p >= 95 ? '#ef4444' : p >= 85 ? '#f59e0b' : '');
+        const warn = (o.metric || 'cpu').includes('temp') ? (raw > 85 ? '#ef4444' : raw > 75 ? '#f59e0b' : '') : (p >= 95 ? '#ef4444' : p >= 85 ? '#f59e0b' : '');
         dial.style.setProperty('--qc', warn || 'var(--q)');
         if (svg) svg.remove();
         dial.insertAdjacentHTML('afterbegin', ringSvg(p));
@@ -647,9 +647,13 @@ W.worldclock = {
     });
     const row = h('div', 'wc-row', items.map((i) => i.el));
     box.append(row);
+    let shown = -1;
     return {
       update() {
-        if (new Date().getSeconds() !== 0 && items[0]?.t.textContent !== '--:--') return;
+        // once a minute, and at once after ticks were missed (the page was not visible, the night screen was on)
+        const minute = Math.floor(Date.now() / 60000);
+        if (minute === shown) return;
+        shown = minute;
         const now = new Date();
         const localUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes());
         row.classList.toggle('vert', box.clientHeight > box.clientWidth * 1.1);
@@ -707,6 +711,7 @@ export function isoWeek(d) {
 
 W.pomodoro = {
   needs: ['tick'],
+  always: true, // the alarm goes off on whatever page is showing
   create(box, { o, page, w }) {
     const key = `pomo:${page.id}/${w.id}`;
     const focusMs = Math.max(1, o.focus || 25) * 60_000, breakMs = Math.max(1, o.break || 5) * 60_000;
@@ -730,6 +735,9 @@ W.pomodoro = {
       save();
     };
     const render = () => {
+      // "today" starts over at midnight also while the panel stays open
+      const day = new Date().toDateString();
+      if (st.day !== day) { st.count = 0; st.day = day; save(); }
       if (st.endsAt && remaining() <= 0) {
         const wasFocus = st.phase === 'focus';
         switchPhase(false);

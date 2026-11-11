@@ -66,7 +66,7 @@ TYPES = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.j
 
 def static(path):
     """Maps a URL path to (content type, bytes) like tools/pages/build.py lays out the site, or None."""
-    if path in ('/', '/index.html'): return 'text/html', (PAGES / 'index.html').read_bytes()
+    if path in ('/', '/index.html'): return 'text/html', site.landing_html().encode()
     if path == '/demo.js': return 'text/javascript', (PAGES / 'demo.js').read_bytes()
     if path in ('/widgets.json', '/templates.json'): return 'application/json', (site.AGENT / path[1:]).read_bytes()
     if path == '/favicon.ico': return 'image/x-icon', (site.AGENT / 'phonebox.ico').read_bytes()

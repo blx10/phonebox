@@ -66,6 +66,14 @@ test('session sheet shows counters and keeps prompt content out of the panel', a
 test('uncontrollable volume shows the reading with disabled controls', async ({ page }) => {
   await layout(page, [widget('volume')]);
   await page.evaluate(async () => {
+    // every later state poll reports the same, so the check does not race the next poll
+    const real = window.fetch;
+    window.fetch = async (...args) => {
+      const r = await real(...args);
+      if (!String(args[0]).includes('/api/state')) return r;
+      const state = await r.json(); state.audio = { volume: 42, muted: false, canControl: false };
+      return new Response(JSON.stringify(state), { headers: { 'Content-Type': 'application/json' } });
+    };
     const { D, emit } = await import('/panel/main.js');
     D.state.audio = { volume: 42, muted: false, canControl: false };
     emit('state');

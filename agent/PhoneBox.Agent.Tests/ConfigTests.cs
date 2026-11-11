@@ -35,6 +35,21 @@ public class ConfigTests
     }
 
     [Fact]
+    public void TurkishCapitalDottedIKeepsItsLetterInIds()
+    {
+        // ToLowerInvariant leaves İ (U+0130) as it is; the id must not lose the letter ("zmir")
+        var c = Load("""
+        { "pages": [ { "title": "İzmir", "icon": "x", "widgets": [ { "type": "clock" } ] },
+                     { "title": "İş Akışı", "icon": "x", "widgets": [ { "type": "clock" } ] } ],
+          "shortcuts": [ { "label": "İndir", "cmd": "notepad" } ],
+          "rules": [ { "name": "İkindi", "when": "always", "then": "notify" } ] }
+        """);
+        Assert.Equal(["izmir", "is-akisi"], c.Pages.Select(p => p.Id));
+        Assert.Equal("indir", c.Shortcuts.Single().Id);
+        Assert.Equal("ikindi", c.Rules.Single().Id);
+    }
+
+    [Fact]
     public void LegacyHomePageKeepsItsTilesAndOptions()
     {
         // 0.6.1: a fixed "home" page with options

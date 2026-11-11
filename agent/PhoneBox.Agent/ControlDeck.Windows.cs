@@ -138,7 +138,9 @@ internal sealed partial class WindowsDeckNative
     private static nint Window(string process)
     {
         var session = Process.GetCurrentProcess().SessionId;
-        var processes = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(process));
+        var name = Path.GetFileNameWithoutExtension(process);
+        if (name.Length == 0) return 0; // a folder: an empty name would match every process
+        var processes = Process.GetProcessesByName(name);
         try { return processes.FirstOrDefault(p => p.SessionId == session && p.MainWindowHandle != 0)?.MainWindowHandle ?? 0; }
         finally { foreach (var p in processes) p.Dispose(); }
     }

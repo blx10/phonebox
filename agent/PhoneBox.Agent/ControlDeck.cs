@@ -30,8 +30,10 @@ public sealed partial class ControlDeck : BackgroundService
     private IReadOnlyList<DeckMonitor> _monitors = [];
     private IReadOnlyList<DeckItem> _plans = [], _midi = [];
 
-    public ControlDeck(ConfigStore config, AudioControl audio, MediaMonitor media, ILogger<ControlDeck> log, SpotifyControl spotify)
-        : this(config, CreateNative(audio, media), log) { _spotify = spotify; }
+    private readonly PushStore? _push;
+    private readonly AudioControl? _master;
+    public ControlDeck(ConfigStore config, AudioControl audio, MediaMonitor media, ILogger<ControlDeck> log, SpotifyControl spotify, PushStore push)
+        : this(config, CreateNative(audio, media), log, null, push, audio) { _spotify = spotify; }
 
     private static IDeckNative CreateNative(AudioControl audio, MediaMonitor media)
     {
@@ -41,9 +43,9 @@ public sealed partial class ControlDeck : BackgroundService
         return new PortableDeckNative(audio, media);
 #endif
     }
-    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null)
+    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, PushStore? push = null, AudioControl? master = null)
     {
-        _config = config; _log = log;
+        _config = config; _log = log; _push = push; _master = master;
         _now = now ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         _tasks = new(config, log);
         _native = native;
@@ -139,7 +141,7 @@ public sealed partial class ControlDeck : BackgroundService
                     lock (_state) { _duckPercent = op == "off" ? null : Math.Clamp(value ?? 25, 0, 100); }
                     ok = true; break;
                 case "sleep":
-                    if (!(await _native.Media(ct)).Any(p => p.Id == id)) return new(false, "Select an active media player");
+                    if (value is > 0 && !(await _native.Media(ct)).Any(p => p.Id == id)) return new(false, "Select an active media player");
                     lock (_state) { RestoreFade(id); if (value is null or <= 0) _sleep.Remove(id); else _sleep[id] = _now() + Math.Clamp(value.Value, 1, 360) * 60_000L; }
                     ok = true; break;
                 case "panic":
@@ -249,7 +251,9 @@ public sealed partial class ControlDeck : BackgroundService
         if (shortcut.Cmd.StartsWith("builtin:", StringComparison.Ordinal) || Uri.TryCreate(shortcut.Cmd, UriKind.Absolute, out var uri) && !uri.IsFile) return false;
         try
         {
-            var processes = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(shortcut.Cmd));
+            var name = Path.GetFileNameWithoutExtension(shortcut.Cmd);
+            if (name.Length == 0) return false; // a folder: an empty name would match every process
+            var processes = Process.GetProcessesByName(name);
             try { return processes.Any(p => p.MainWindowHandle != 0); }
             finally { foreach (var process in processes) process.Dispose(); }
         }
@@ -266,7 +270,7 @@ public sealed partial class ControlDeck : BackgroundService
             var focused = await _native.PlatformAction("focus", shortcut.Cmd, null, 0, ct);
             return new(focused, focused ? null : "Windows could not focus the running application");
         }
-        var error = Shortcuts.Run(config, id, _log);
+        var error = Shortcuts.Run(config, id, _log, _push, _master);
         return new(error is null, error is null ? null : "Configured shortcut failed");
     }
 

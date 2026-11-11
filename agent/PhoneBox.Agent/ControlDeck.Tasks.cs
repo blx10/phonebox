@@ -32,7 +32,7 @@ internal sealed class ControlTasks(ConfigStore config, ILogger log) : IDisposabl
             previous?.Stop.Dispose();
             var job = new Job(); _jobs[action.Id] = job;
             job.Work = Run(job, shortcut, action.Kind == "server" ? TimeSpan.FromHours(24) : TimeSpan.FromMinutes(30));
-            return new(true);
+            return job.State == "Failed to start" ? new(false, "The configured task could not be started") : new(true);
         }
     }
     private async Task Run(Job job, Shortcut shortcut, TimeSpan timeout)

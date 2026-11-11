@@ -1,7 +1,7 @@
 name: release
 
-# Builds every release artifact on GitHub's runners and publishes them with checksums as a GitHub release, the CI
-# twin of scripts/release.ps1. Start it from Actions › release › Run workflow after bumping the version.
+# Builds every release artifact on GitHub's runners and publishes them with checksums as a GitHub release.
+# scripts/release.ps1 dispatches this workflow. Start it from Actions › release › Run workflow after bumping the version.
 #
 # The APK must be signed with the same key as the app already on the phones, or Android refuses the update. Add the
 # key as repository secrets: PHONEBOX_KEYSTORE_BASE64 (base64 of the .jks / .keystore file), PHONEBOX_STORE_PASSWORD,

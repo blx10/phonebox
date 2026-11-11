@@ -113,7 +113,7 @@ public sealed class AdbReverse(ConfigStore cfg, ILogger<AdbReverse> log, AgentEn
             var list = await Adb(adb, $"-s {d} reverse --list", ct);
             if (list.Contains(Rule) && !_missingApp.Contains(d)) continue;
             // is the app there at all? (the agent may have been installed on its own, with winget or Scoop)
-            var installed = (await Adb(adb, $"-s {d} shell pm path net.oxog.phonebox.deskpanel", ct)).Contains("package:");
+            var installed = (await Adb(adb, $"-s {d} shell pm path net.oxog.phonebox.deskpanel", ct, anyExit: true)).Contains("package:");
             _missingApp = installed ? _missingApp.Where(x => x != d).ToArray() : _missingApp.Union([d]).ToArray();
             if (!installed) { Report($"{d}: the PhoneBox app is not installed (Settings › General › Install the phone app)"); continue; }
             if (list.Contains(Rule)) continue;
@@ -199,7 +199,7 @@ public sealed class AdbReverse(ConfigStore cfg, ILogger<AdbReverse> log, AgentEn
         return candidates.FirstOrDefault(File.Exists);
     }
 
-    internal static async Task<string> Adb(string adb, string args, CancellationToken ct)
+    internal static async Task<string> Adb(string adb, string args, CancellationToken ct, bool anyExit = false)
     {
         var psi = new ProcessStartInfo(adb, args)
         {
@@ -207,7 +207,7 @@ public sealed class AdbReverse(ConfigStore cfg, ILogger<AdbReverse> log, AgentEn
             WorkingDirectory = AppPaths.NeutralCwd,
         };
         var result = await ToolProcess.RunAsync(psi, TimeSpan.FromSeconds(8), ct);
-        if (result.ExitCode != 0) throw new IOException($"ADB exited with code {result.ExitCode}");
+        if (result.ExitCode != 0 && !anyExit) throw new IOException($"ADB exited with code {result.ExitCode}");
         return result.Output;
     }
 }

@@ -41,11 +41,14 @@ function slider(label, send, max = 100) {
   input.setAttribute('aria-label', label);
   const number = h('output', 'deck-value');
   let editing = false;
+  // the track's filled part (style.css reads --p); min and max may be changed by the caller after creation
+  const fill = () => { const lo = +input.min || 0, hi = +input.max || 100; input.style.setProperty('--p', (hi > lo ? Math.max(0, Math.min(100, (input.value - lo) / (hi - lo) * 100)) : 0) + '%'); };
   input.onpointerdown = () => { editing = true; };
-  input.oninput = () => { number.textContent = input.value; };
+  input.oninput = () => { number.textContent = input.value; fill(); };
   input.onchange = async () => { editing = false; try { await send(+input.value); } catch (e) { fail(e); } };
-  input.onpointercancel = () => { editing = false; };
-  return { input, number, set(value) { if (!editing && document.activeElement !== input) input.value = String(value); number.textContent = String(editing ? input.value : value); } };
+  // a touch that does not move the fader sends no "change": the fader must follow the computer again afterwards
+  input.onpointerup = input.onpointercancel = input.onlostpointercapture = input.onblur = () => { editing = false; };
+  return { input, number, set(value) { if (!editing && document.activeElement !== input) input.value = String(value); number.textContent = String(editing ? input.value : value); fill(); } };
 }
 function meter(value) { const e = h('div', 'deck-meter', h('i')); e.firstChild.style.transform = `scaleX(${Math.max(0, Math.min(1, value || 0))})`; return e; }
 
@@ -309,7 +312,7 @@ export function registerDeckWidget(type, title, mode = type) {
         const components = ['sleep', 'restart', 'shutdown'].map(action => { const item = h('div', 'deck-power-item'); group.append(item); return hold(item, o, action); });
         component = { render(data) { components.forEach(c => c.render(data)); }, destroy() { components.forEach(c => c.destroy()); } };
       } else if (mode === 'duck') {
-        let enabled = false; const b = button('Enable ducking', () => deckCommand('duck', { op: enabled ? 'off' : 'on', value: o.level || 25 })); box.append(b);
+        let enabled = false; const b = button('Enable ducking', () => deckCommand('duck', { op: enabled ? 'off' : 'on', value: o.level ?? 25 })); box.append(b);
         render = data => { enabled = data.ducking; b.textContent = enabled ? 'Disable ducking' : 'Enable ducking'; b.setAttribute('aria-pressed', String(enabled)); };
       } else if (mode === 'profiles') {
         const list = h('div', 'deck-actions'); box.append(list); let key = '';
@@ -433,8 +436,8 @@ W['meeting-timer'] = {needs:['tick'],create(box,{o}){
   const clock=h('div','deck-track');box.classList.add('control-deck');box.append(h('div','w-title',o.title || 'Meeting timer'),clock);
   let state=store.get(key,{elapsed:0,started:0});
   const persist=()=>store.set(key,state);
-  const start=button(state.started?'Pause':'Start',()=>{if(state.started){state.elapsed+=Date.now()-state.started;state.started=0;}else state.started=Date.now();persist();render();});
+  const start=button(state.started?'Pause':'Start',()=>{state=store.get(key,state);if(state.started){state.elapsed+=Date.now()-state.started;state.started=0;}else state.started=Date.now();persist();render();});
   box.append(start,button('Reset',()=>{state={elapsed:0,started:0};persist();render();}));
-  function render(){const elapsed=state.elapsed+(state.started?Date.now()-state.started:0);clock.textContent=timeText(elapsed);start.textContent=state.started?'Pause':'Start';start.setAttribute('aria-label',start.textContent);clock.classList.toggle('deck-overdue',elapsed>=(o.minutes || 30)*60000);}
+  function render(){state=store.get(key,state);const elapsed=state.elapsed+(state.started?Date.now()-state.started:0);clock.textContent=timeText(elapsed);start.textContent=state.started?'Pause':'Start';start.setAttribute('aria-label',start.textContent);clock.classList.toggle('deck-overdue',elapsed>=(o.minutes || 30)*60000);}
   render();return {update:render};
 }};

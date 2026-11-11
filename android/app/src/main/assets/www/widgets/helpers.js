@@ -18,9 +18,14 @@ export function cached(key, url, maxAgeMs) {
 }
 
 /** Calls load() now and then every intervalMs while the widget is on a visible page. */
-export function every(intervalMs, load) {
-  let last = 0;
-  return () => { if (Date.now() - last >= intervalMs) { last = Date.now(); load(); } };
+export function every(intervalMs, load, retryMs = 60_000) {
+  let next = 0;
+  return () => {
+    if (Date.now() < next) return;
+    next = Date.now() + intervalMs;
+    // a load that returns false failed (offline, service down): try again soon, not after the whole interval
+    Promise.resolve(load()).then((ok) => { if (ok === false) next = Math.min(next, Date.now() + retryMs); }, () => {});
+  };
 }
 
 export function sparkLine(canvas, data, col) {

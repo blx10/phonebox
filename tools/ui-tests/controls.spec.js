@@ -58,7 +58,7 @@ test('unsupported player modes are disabled instead of appearing to work', async
 });
 
 test('OBS mixer mute is reflected by the integration state', async ({page})=>{
-  await show(page,'obs-mixer');
+  await show(page,'obs-mixer',{control:true});
   await expect(page.getByRole('slider',{name:'Desktop Audio volume',exact:true})).toHaveValue('70');
   await page.getByRole('button',{name:'Mute Desktop Audio',exact:true}).click();
   await expect.poll(()=>page.evaluate(async()=>(await(await fetch('/agent/api/controls/obs')).json()).inputs[0].muted)).toBe(true);
@@ -67,8 +67,27 @@ test('OBS mixer mute is reflected by the integration state', async ({page})=>{
 
 test('Spotify queue starts the selected item through an ID-only request',async({page})=>{
   await show(page,'media-queue');
-  await page.getByRole('button',{name:'Next track · Demo artist',exact:true}).click();
-  await expect.poll(()=>page.evaluate(async()=>(await(await fetch('/agent/api/controls/spotify/state')).json()).current.name)).toBe('Next track');
+  await page.getByRole('button',{name:'Paper Lanterns · Neon Harbor',exact:true}).click();
+  await expect.poll(()=>page.evaluate(async()=>(await(await fetch('/agent/api/controls/spotify/state')).json()).current.name)).toBe('Paper Lanterns');
+});
+
+test('OBS controls are refused until a widget allows control, as on the agent', async ({page})=>{
+  await show(page,'obs-mixer');
+  await page.getByRole('button',{name:'Mute Desktop Audio',exact:true}).click();
+  await expect(page.locator('.toast').filter({hasText:'Enable OBS control'})).toBeVisible();
+  expect(await page.evaluate(async()=>(await(await fetch('/agent/api/controls/obs')).json()).inputs[0].muted)).toBe(false);
+});
+
+test('a fader shows its level as the filled part of the track and follows the computer after a tap', async ({page})=>{
+  await show(page,'audio-mixer');
+  const spotify=page.getByRole('slider',{name:'Spotify volume',exact:true});
+  await expect(spotify).toHaveValue('65');
+  expect(await spotify.evaluate(el=>el.style.getPropertyValue('--p'))).toBe('65%');
+  // a touch that does not move the fader sends no change; the next state must still move it
+  await spotify.dispatchEvent('pointerdown');await spotify.dispatchEvent('pointerup');
+  await page.evaluate(()=>fetch('/agent/api/controls/command/session?id=spotify&value=20',{method:'POST'}));
+  await expect(spotify).toHaveValue('20');
+  expect(await page.locator('.control-deck').evaluate(el=>parseFloat(getComputedStyle(el).paddingLeft))).toBeGreaterThan(0);
 });
 
 test('meeting timer keeps elapsed time after reloading',async({page})=>{
@@ -97,7 +116,7 @@ test('desktop control bindings and captured profiles survive Save without leakin
   await root.locator('summary').filter({hasText:'Private sound'}).click();
   await expect(root.getByRole('textbox',{name:'Target',exact:true})).toHaveValue('C:\\private-test\\sound.wav');
   const publicConfig=await page.evaluate(async()=>JSON.stringify(await(await fetch('/agent/api/config')).json()));
-  expect(publicConfig).not.toContain('private-test');expect(publicConfig).not.toContain('controls');
+  expect(publicConfig).not.toContain('private-test');expect(publicConfig).not.toContain('Private sound');expect(JSON.parse(publicConfig).config.controls).toBeUndefined();
 });
 
 for(const viewport of [{width:780,height:360},{width:360,height:780}]){

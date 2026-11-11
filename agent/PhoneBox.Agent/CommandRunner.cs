@@ -23,7 +23,8 @@ public sealed class CommandRunner(ConfigStore cfg, ILogger<CommandRunner> log)
     {
         var w = cfg.Get().Pages.FirstOrDefault(p => p.Id == pageId)?.Widgets?.FirstOrDefault(x => x.Id == widgetId && x.Type == "command");
         if (w is null) return null;
-        var command = (!OperatingSystem.IsWindows() ? w.Str("commandUnix") : null) ?? w.Str("command") ?? "";
+        // an empty Linux / macOS command means "the same one"
+        var command = (!OperatingSystem.IsWindows() && w.Str("commandUnix") is { } unix && !string.IsNullOrWhiteSpace(unix) ? unix : null) ?? w.Str("command") ?? "";
         var interval = Math.Clamp(w.Int("interval") ?? 30, 5, 86400);
         var key = $"{pageId}/{widgetId}:{command.GetHashCode()}";
         var cached = _results.GetValueOrDefault(key);
