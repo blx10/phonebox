@@ -66,6 +66,8 @@ public sealed class DeckAuditTests
     [Fact]
     public async Task DeckRunsTheOffCommandOfAToggleWhosePushedStateIsOn()
     {
+        // the attempted command is read from the launch failure in the log, which only Windows reports for a missing .exe
+        if (!OperatingSystem.IsWindows()) return;
         var dir = TempDir("toggle");
         try
         {
