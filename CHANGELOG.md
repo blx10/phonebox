@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Panel**
+- 12-hour times: Settings › Display › "12-hour times" shows 2:05 PM instead of 14:05 on the clock, world clocks,
+  night screen, agenda, Next up, countdown, sunrise/sunset, quota resets and "rules paused until" (#31). Off by
+  default.
+- World clocks with many zones in a narrow widget no longer run their times into each other.
+
 ## 0.9.4 — 2026-11-11
 
 A full audit of the agent, the panel, the settings page and the tooling. Every fix below has a regression test or a

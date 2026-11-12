@@ -1,4 +1,4 @@
-import { $, API, D, PANEL_HEADERS, LOCALE, Q_STYLE, api, bridge, cfg, color, rulesPaused, toggleRulesPause, fillIcon, fmtDur, fmtMem, gotoPageRef, h, haptic, openSheet, paceInfo, pad, quotaProviders, store, tick, toast } from '../main.js';
+import { $, API, D, PANEL_HEADERS, LOCALE, Q_STYLE, api, bridge, cfg, color, rulesPaused, toggleRulesPause, fillIcon, fmtDur, fmtHM, fmtMem, gotoPageRef, h, haptic, openSheet, paceInfo, pad, quotaProviders, store, tick, toast } from '../main.js';
 import { W } from '../registry.js';
 import { canKillAnywhere, dialEl, every } from './helpers.js';
 
@@ -265,7 +265,7 @@ W.agenda = {
     const days = Math.max(1, Math.min(14, +o.days || 7));
     const only = String(o.calendars || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
     let lastKey = '';
-    const hm = (ms) => { const d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+    const hm = (ms) => fmtHM(new Date(ms));
     const dayKey = (ms) => new Date(ms).toDateString();
     const dayName = (ms) => {
       const d = new Date(ms), t = new Date();
@@ -491,7 +491,7 @@ W.rules = {
         box.classList.toggle('paused', !!paused);
         if (!rules.length) { list.replaceChildren(h('div', 'empty', 'Add rules in Settings › Rules')); return; }
         const sorted = [...rules].sort((a, b) => active.includes(b.id) - active.includes(a.id));
-        list.replaceChildren(...(paused ? [h('div', 'ru-note', `Paused until ${new Date(rulesPaused).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })}`)] : []),
+        list.replaceChildren(...(paused ? [h('div', 'ru-note', `Paused until ${fmtHM(new Date(rulesPaused))}`)] : []),
           ...sorted.map((r) => h('div', 'ru-row' + (active.includes(r.id) && !paused ? ' on' : ''),
             h('span', 'ru-ico', RULE_WHEN[r.when] || '⚡'), h('span', 'ru-name', r.name || r.when), h('i', 'ru-dot'))));
       },
@@ -539,7 +539,7 @@ W.nextup = {
     const when = h('div', 'nu-when'), title = h('div', 'nu-title'), meta = h('div', 'nu-meta'), bar = h('i'), track = h('div', 'track nu-track', bar);
     box.append(h('div', 'w-title', o.title || 'Next up'), when, title, meta, track);
     let key = '';
-    const hm = (ms) => { const d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+    const hm = (ms) => fmtHM(new Date(ms));
     return {
       update() {
         const cal = D.calendar, now = Date.now();

@@ -102,6 +102,10 @@ export function h(tag, cls, ...kids) {
 }
 
 export const pad = (n) => String(n).padStart(2, '0');
+// Clock times follow display.hour12: "14:05" (default) or "2:05 PM". Pass hours 0-23.
+export const hour12 = () => cfg.display?.hour12 === true;
+export const fmtClock = (H, M) => (hour12() ? `${H % 12 || 12}:${pad(M)} ${H < 12 ? 'AM' : 'PM'}` : `${pad(H)}:${pad(M)}`);
+export const fmtHM = (d) => fmtClock(d.getHours(), d.getMinutes());
 export const fmtTime = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ':' + pad(s % 60); };
 export function fmtRate(bps) {
   if (bps == null) return ['—', ''];
@@ -418,7 +422,7 @@ export const Q_STYLE = { antigravity: { color: '#38bdf8', logo: '✦' }, claude:
 export function fmtReset(ts) {
   if (!ts) return '';
   const d = new Date(ts);
-  const hm = d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
+  const hm = fmtHM(d);
   const day = d.toDateString() === new Date().toDateString() ? hm : d.toLocaleDateString(LOCALE, { weekday: 'short' }) + ' ' + hm;
   return `${day} · in ${fmtDur(ts - Date.now())}`;
 }
@@ -751,7 +755,7 @@ export function buildLayout() {
   const enabled = (cfg.pages || []).filter((p) => p.enabled !== false && Array.isArray(p.widgets));
   const next = enabled.length ? enabled : FALLBACK_PAGES;
   const portrait = isPortrait();
-  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, cfg.display?.appearance, portrait]);
+  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, cfg.display?.hour12, cfg.display?.appearance, portrait]);
   if (key === layoutKey) return;
   layoutKey = key;
   const prevId = pages[curPage]?.id;
@@ -1046,7 +1050,7 @@ export function renderRulesBtn() {
   const paused = rulesPaused && rulesPaused > Date.now();
   b.hidden = PREVIEW || !online;
   b.classList.toggle('on', !!paused);
-  b.textContent = paused ? `⏸ Rules paused until ${new Date(rulesPaused).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })} · resume` : '⏸ Pause rules 1 h';
+  b.textContent = paused ? `⏸ Rules paused until ${fmtHM(new Date(rulesPaused))} · resume` : '⏸ Pause rules 1 h';
 }
 
 export let titleTimer = 0;
@@ -1246,7 +1250,7 @@ window.onAndroidSensor = (kind, value) => {
 
 export function tick() {
   const now = new Date();
-  $('nClock').textContent = pad(now.getHours()) + ':' + pad(now.getMinutes());
+  $('nClock').textContent = fmtHM(now);
   $('nDate').textContent = now.toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long' });
   if (darkSince && Date.now() - darkSince > 30_000) darkRoom = true;
   const dark = darkRoom && cfg.display?.nightWhenDark === true;

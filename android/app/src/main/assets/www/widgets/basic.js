@@ -1,4 +1,4 @@
-import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtDur, fmtMem, fmtReset, fmtTime, fmtValue, h, haptic, hist, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, ringSvg, setArtColor, setVolDragging, shortDur, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
+import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtClock, fmtDur, fmtHM, fmtMem, fmtReset, fmtTime, fmtValue, h, hour12, haptic, hist, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, ringSvg, setArtColor, setVolDragging, shortDur, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
 import { W } from '../registry.js';
 
 // ================================================================= widgets
@@ -9,16 +9,18 @@ W.clock = {
   bare: true, needs: ['tick', 'state', 'weather', 'quotas', 'work'],
   create(box, { o }) {
     const status = o.status !== false ? h('div', 'status') : null;
-    const hh = h('span', 'hh', '--'), mm = h('span', 'mm', '--'), ss = h('span', 'sec');
+    const hh = h('span', 'hh', '--'), mm = h('span', 'mm', '--'), ss = h('span', 'sec'), ap = h('span', 'ap');
     const date = o.date !== false ? h('div', 'date') : null;
     const wx = o.weather !== false ? wxBlock() : null;
-    box.append(status || '', h('div', 'clock', hh, h('span', 'colon', ':'), mm, ss), date || '', wx || '');
+    box.append(status || '', h('div', 'clock', hh, h('span', 'colon', ':'), mm, ss, ap), date || '', wx || '');
     box.style.setProperty('--tf', (0.84 - (status ? 0.1 : 0) - (date ? 0.11 : 0) - (wx ? 0.2 : 0)).toFixed(2));
     return {
       update(kind) {
         if (kind === 'tick') {
           const now = new Date();
-          hh.textContent = pad(now.getHours());
+          const H = now.getHours(), h12 = hour12();
+          hh.textContent = h12 ? String(H % 12 || 12) : pad(H);
+          ap.textContent = h12 ? (H < 12 ? 'AM' : 'PM') : '';
           mm.textContent = pad(now.getMinutes());
           ss.textContent = cfg.display?.showSeconds === false ? '' : pad(now.getSeconds());
           if (date) date.textContent = now.toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long' });
@@ -657,10 +659,12 @@ W.worldclock = {
         const now = new Date();
         const localUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes());
         row.classList.toggle('vert', box.clientHeight > box.clientWidth * 1.1);
+        row.classList.toggle('h12', hour12());
         for (const it of items) {
           if (!it.fmt) continue;
           const p = Object.fromEntries(it.fmt.formatToParts(now).map((x) => [x.type, x.value]));
-          it.t.textContent = `${p.hour}:${p.minute}`;
+          const [hm, ap] = fmtClock(+p.hour % 24, +p.minute).split(' ');
+          it.t.replaceChildren(hm, ap ? h('span', 'wc-ap', ' ' + ap) : '');
           const zoneUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
           const diffH = Math.round((zoneUtc - localUtc) / 360000) / 10;
           const dayDiff = Math.round((Date.UTC(+p.year, +p.month - 1, +p.day) - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
@@ -774,7 +778,7 @@ W.countdown = {
     const big = h('div', 'cd-v'), sub = h('div', 'cd-s');
     box.append(h('div', 'cd-l', o.label || 'Countdown'), big, sub);
     if (Number.isNaN(target)) { big.textContent = '—'; sub.textContent = 'Set a date as YYYY-MM-DD HH:MM'; return {}; }
-    sub.textContent = new Date(target).toLocaleString(LOCALE, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    sub.textContent = new Date(target).toLocaleDateString(LOCALE, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) + ', ' + fmtHM(new Date(target));
     return {
       update() {
         let d = target - Date.now();
