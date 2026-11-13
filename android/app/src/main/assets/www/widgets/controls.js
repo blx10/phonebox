@@ -386,16 +386,23 @@ function radioView(box, options) {
       let entry = cards.get(item.id);
       if (!entry) {
         const fallback = h('span', 'radio-fallback', radioInitials(item.name));
+        const img = h('img', 'radio-logo');
+        img.alt = '';
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.draggable = false;
         const eq = h('span', 'radio-eq', h('i'), h('i'), h('i'));
         eq.setAttribute('aria-hidden', 'true');
-        const logoBox = h('div', 'radio-logo-box', fallback, eq);
+        const logoBox = h('div', 'radio-logo-box', fallback, img, eq);
+        img.onload = () => logoBox.classList.add('has-logo');
+        img.onerror = () => logoBox.classList.remove('has-logo');
 
         const name = h('span', 'radio-name', item.name);
         const el = h('button', 'radio-card');
         el.type = 'button';
         el.append(logoBox, name);
 
-        entry = { el, name, fallback, logoBox, item, busy: false };
+        entry = { el, img, name, fallback, logoBox, item, busy: false, logoKey: '' };
         el.onclick = async () => {
           if (commandBusy || entry.busy) return;
           haptic();
@@ -438,6 +445,15 @@ function radioView(box, options) {
     });
 
     reconcile(track, nodes);
+    for (const [id, entry] of cards.entries()) {
+      const rev = entry.item.rev || entry.item.name || '';
+      const nextKey = `${id}:${rev}`;
+      if (entry.logoKey !== nextKey) {
+        entry.logoKey = nextKey;
+        entry.logoBox.classList.remove('has-logo');
+        entry.img.src = `${API}/controls/radio-logo?id=${encodeURIComponent(id)}&v=${encodeURIComponent(rev)}`;
+      }
+    }
     for (const id of [...cards.keys()]) {
       if (!items.some(i => i.id === id)) cards.delete(id);
     }

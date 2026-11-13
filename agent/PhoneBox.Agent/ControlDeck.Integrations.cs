@@ -115,6 +115,9 @@ public sealed partial class ControlDeck
         if (action.Kind is "mixer" or "mixer-mute") { state = MixerValue(action); available = state is not null; state ??= "Mixer is not connected"; }
         if (action.Kind == "audio-route" && (string.IsNullOrWhiteSpace(_config.Get().Controls.MixerExecutable) || !File.Exists(_config.Get().Controls.MixerExecutable)))
         { available = false; state = "Configure SoundVolumeView"; }
-        return new(action.Id, action.Label, action.Kind, state, available);
+        var rev = action.Kind == "radio"
+            ? RadioLogoCache.CacheKey(action, _config.Get().Controls.AllowOnlineRadioLogos)[..12]
+            : null;
+        return new(action.Id, action.Label, action.Kind, state, available, rev);
     }
 }

@@ -25,6 +25,7 @@ public sealed partial class ControlDeck : BackgroundService
     private readonly Dictionary<string, (int Original, int Applied)> _duck = [];
     private int? _duckPercent;
     private readonly Dictionary<string, long> _sleep = [];
+    private readonly RadioLogoCache _logos;
     private readonly HashSet<string> _activeRadios = [];
     private readonly Lock _radioState = new();
     private Task? _hardwareJob;
@@ -46,12 +47,13 @@ public sealed partial class ControlDeck : BackgroundService
         return new PortableDeckNative(audio, media);
 #endif
     }
-    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, PushStore? push = null, AudioControl? master = null)
+    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, PushStore? push = null, AudioControl? master = null, RadioLogoCache? logos = null)
     {
         _config = config; _log = log; _push = push; _master = master;
         _now = now ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         _tasks = new(config, log);
         _native = native;
+        _logos = logos ?? new RadioLogoCache();
         _ptt = new(id => Audio().Devices.FirstOrDefault(d => d.Id == id && d.Direction == "input")?.Muted,
             (id, muted) => { try { var ok = _native.Device(id, null, muted); Invalidate(); return ok; } catch { return false; } }, () => Environment.TickCount64);
     }
@@ -333,7 +335,22 @@ public sealed partial class ControlDeck : BackgroundService
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-        finally { _ptt.Sweep(all: true); RestoreDucking(); lock (_state) foreach (var player in _fades.Keys.ToArray()) RestoreFade(player); await _tasks.StopAsync(); DisposeMixer(); _native.Dispose(); }
+        finally { _ptt.Sweep(all: true); RestoreDucking(); lock (_state) foreach (var player in _fades.Keys.ToArray()) RestoreFade(player); await _tasks.StopAsync(); DisposeMixer(); _native.Dispose(); _logos.Dispose(); }
+    }
+
+    public override void Dispose()
+    {
+        base.Dispose();
+        _logos.Dispose();
+    }
+
+    /// <summary>Fetches or generates the cached logo for the specified radio action.</summary>
+    internal async Task<RadioLogo?> RadioLogoAsync(string id, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(id) || id.Length > 128) return null;
+        var c = _config.Get().Controls;
+        var action = c.Actions.FirstOrDefault(a => a.Id == id && a.Kind == "radio");
+        return action is null ? null : await _logos.GetAsync(action, c.AllowOnlineRadioLogos, ct);
     }
 
     /// <summary>Stops all active radio stations, optionally excluding one station ID.</summary>
