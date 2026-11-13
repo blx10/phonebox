@@ -4,6 +4,19 @@ using System.Text.Json;
 
 namespace PhoneBox.Agent;
 
+/// <summary>Per-provider cost and token usage over <see cref="QuotaOverview.WindowDays"/>.</summary>
+public sealed record QuotaSubscriptionCost(string Id, string Name, long Tokens, double Cost,
+    string CurrencyCode = "USD", double SessionCost = 0, long SessionTokens = 0);
+
+/// <summary>Per-model cost and token usage over <see cref="QuotaOverview.WindowDays"/>.</summary>
+public sealed record QuotaTopModelCost(string ModelName, string ProviderId, string ProviderName,
+    double Cost, long Tokens, string CurrencyCode = "USD");
+
+/// <summary>Aggregated CodexBar cost overview over one stated rolling window (<see cref="WindowDays"/>).</summary>
+public sealed record QuotaOverview(long TotalTokens, double TotalCost, string CurrencyCode, int WindowDays,
+    int ProviderCount, long UpdatedAt, IReadOnlyList<QuotaSubscriptionCost> Subscriptions,
+    IReadOnlyList<QuotaTopModelCost> TopModels);
+
 internal static class CodexBar
 {
     private static readonly Dictionary<string, string> Names = new(StringComparer.OrdinalIgnoreCase)
@@ -43,6 +56,172 @@ internal static class CodexBar
 
     /// <summary>Maps a CodexBar provider identifier to its display name.</summary>
     internal static string DisplayName(string rawId) => Names.TryGetValue(rawId, out var known) ? known : FormatName(rawId);
+
+    internal const long OverviewStaleMs = 3_600_000;
+
+    /// <summary>Returns the cached cost overview only while enabled and within the 1-hour freshness window.</summary>
+    internal static QuotaOverview? SelectOverview(QuotaOverview? overview, bool enabled, long now) =>
+        enabled && overview is { UpdatedAt: var updated } && now - updated <= OverviewStaleMs ? overview : null;
+
+    /// <summary>
+    /// Runs `codexbar cost --days 30 --format json` and parses the cost overview.
+    /// </summary>
+    public static async Task<QuotaOverview?> ReadCostAsync(string path, CancellationToken ct)
+    {
+        var start = new ProcessStartInfo(path);
+        start.ArgumentList.Add("cost");
+        start.ArgumentList.Add("--days");
+        start.ArgumentList.Add("30");
+        start.ArgumentList.Add("--format");
+        start.ArgumentList.Add("json");
+        var result = await ToolProcess.RunAsync(start, TimeSpan.FromSeconds(25), ct);
+        return ParseCost(result.Output, result.ExitCode);
+    }
+
+    /// <summary>
+    /// Parses CodexBar CLI cost JSON into an overview over one consistent window and primary currency.
+    /// </summary>
+    public static QuotaOverview? ParseCost(string json, int exitCode = 0, DateOnly? referenceDate = null)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) throw new JsonException("Expected a CodexBar cost array");
+
+        var items = new List<(JsonElement Item, string RawId, string Id)>();
+        int? minWindow = null;
+        foreach (var item in doc.RootElement.EnumerateArray())
+        {
+            var rawId = Str(item, "provider")?.Trim();
+            if (string.IsNullOrEmpty(rawId) || string.Equals(rawId, "cli", StringComparison.OrdinalIgnoreCase)) continue;
+            var id = rawId.ToLowerInvariant();
+            items.Add((item, rawId, id));
+
+            var totals = Prop(item, "totals");
+            var daily = Prop(item, "daily");
+            var hasData = (Num(item, "last30DaysCostUSD") ?? Num(totals, "totalCost") ?? 0) > 0
+                || (Num(item, "last30DaysTokens") ?? Num(totals, "totalTokens") ?? 0) > 0
+                || (daily.ValueKind == JsonValueKind.Array && daily.GetArrayLength() > 0);
+            if (!hasData) continue;
+            var itemWin = Num(item, "historyDays") is { } hd && hd >= 1 ? Math.Min((int)hd, 30) : 30;
+            minWindow = minWindow is { } cur ? Math.Min(cur, itemWin) : itemWin;
+        }
+
+        var windowDays = minWindow ?? 30;
+        var subs = new List<QuotaSubscriptionCost>();
+        var models = new Dictionary<(string Id, string Model, string Currency), (string ModelName, string ProviderId, string ProviderName, double Cost, long Tokens, string CurrencyCode)>();
+
+        foreach (var (item, rawId, id) in items)
+        {
+            var name = DisplayName(rawId);
+            var currency = Str(item, "currencyCode")?.Trim().ToUpperInvariant();
+            if (string.IsNullOrEmpty(currency)) currency = "USD";
+
+            var totals = Prop(item, "totals");
+            var dailyEl = Prop(item, "daily");
+            var parsedDaily = new List<(DateOnly Date, double Cost, long Tokens, JsonElement Breakdowns)>();
+            if (dailyEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var d in dailyEl.EnumerateArray())
+                {
+                    if (Str(d, "date") is not { } ds || !DateOnly.TryParse(ds, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+                        continue;
+                    parsedDaily.Add((date, Num(d, "totalCost") ?? 0, (long)(Num(d, "totalTokens") ?? 0), Prop(d, "modelBreakdowns")));
+                }
+            }
+
+            var anchorDate = referenceDate
+                ?? (Date(Str(item, "updatedAt")) is { } updMs ? DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeMilliseconds(updMs).UtcDateTime) : (DateOnly?)null)
+                ?? (parsedDaily.Count > 0 ? (DateOnly?)parsedDaily.Max(x => x.Date) : null)
+                ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            var windowStart = anchorDate.AddDays(-(windowDays - 1));
+            var filteredDaily = parsedDaily.Where(d => d.Date >= windowStart && d.Date <= anchorDate).ToList();
+            var hasFilteredDaily = filteredDaily.Count > 0;
+
+            double dailyCost = 0;
+            long dailyTokens = 0;
+            var itemModels = new List<(string ModelName, double Cost, long Tokens)>();
+            foreach (var d in filteredDaily)
+            {
+                dailyCost += d.Cost;
+                dailyTokens += d.Tokens;
+                if (d.Breakdowns.ValueKind != JsonValueKind.Array) continue;
+                foreach (var m in d.Breakdowns.EnumerateArray())
+                {
+                    var mName = Str(m, "modelName")?.Trim();
+                    if (string.IsNullOrEmpty(mName)) continue;
+                    itemModels.Add((mName, Math.Max(0, Num(m, "cost") ?? 0), Math.Max(0, (long)(Num(m, "totalTokens") ?? 0))));
+                }
+            }
+
+            int? histDays = Num(item, "historyDays") is { } h && h >= 1 ? (int)h : null;
+            double? rawCost;
+            long? rawTok;
+            if (histDays == windowDays || (histDays is null && windowDays == 30))
+            {
+                rawCost = Num(item, "last30DaysCostUSD") ?? Num(totals, "totalCost") ?? (hasFilteredDaily ? dailyCost : null);
+                rawTok = (Num(item, "last30DaysTokens") ?? Num(totals, "totalTokens")) is { } t ? (long)t : (hasFilteredDaily ? dailyTokens : null);
+            }
+            else if (histDays > 30 && windowDays == 30)
+            {
+                rawCost = Num(item, "last30DaysCostUSD") ?? (hasFilteredDaily ? dailyCost : null);
+                rawTok = Num(item, "last30DaysTokens") is { } t ? (long)t : (hasFilteredDaily ? dailyTokens : null);
+            }
+            else
+            {
+                if (!hasFilteredDaily) continue;
+                rawCost = dailyCost;
+                rawTok = dailyTokens;
+            }
+
+            if (rawCost is null && rawTok is null) continue;
+            var cost = Math.Max(0, rawCost ?? 0);
+            var tok = Math.Max(0, rawTok ?? 0);
+            if (cost <= 0 && tok <= 0 && !hasFilteredDaily) continue;
+
+            var sessCost = Math.Max(0, Num(item, "sessionCostUSD") ?? 0);
+            var sessTok = Math.Max(0, (long)(Num(item, "sessionTokens") ?? 0));
+            subs.Add(new QuotaSubscriptionCost(id, name, tok, cost, currency, sessCost, sessTok));
+
+            foreach (var (mName, mCost, mTok) in itemModels)
+            {
+                var key = (id, mName.ToLowerInvariant(), currency);
+                if (!models.TryGetValue(key, out var cur))
+                    cur = (mName, id, name, 0, 0, currency);
+                models[key] = (cur.ModelName, cur.ProviderId, cur.ProviderName, cur.Cost + mCost, cur.Tokens + mTok, currency);
+            }
+        }
+
+        if (subs.Count == 0)
+        {
+            if (exitCode != 0) throw new IOException("CodexBar cost exited with code " + exitCode);
+            return null;
+        }
+
+        var overviewCurrency = subs
+            .GroupBy(s => s.CurrencyCode, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => g.Count())
+            .ThenByDescending(g => string.Equals(g.Key, "USD", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(g => g.Sum(s => s.Cost))
+            .Select(g => g.Key)
+            .First();
+
+        var totalCost = subs.Where(s => s.CurrencyCode == overviewCurrency).Sum(s => s.Cost);
+        var totalTokens = subs.Where(s => s.CurrencyCode == overviewCurrency).Sum(s => s.Tokens);
+        var sortedSubs = subs
+            .OrderByDescending(s => s.CurrencyCode == overviewCurrency)
+            .ThenByDescending(s => s.Cost)
+            .ThenByDescending(s => s.Tokens)
+            .ToList();
+        var topModels = models.Values
+            .Where(m => m.CurrencyCode == overviewCurrency)
+            .OrderByDescending(m => m.Cost)
+            .ThenByDescending(m => m.Tokens)
+            .Take(6)
+            .Select(m => new QuotaTopModelCost(m.ModelName, m.ProviderId, m.ProviderName, m.Cost, m.Tokens, m.CurrencyCode))
+            .ToList();
+
+        return new QuotaOverview(totalTokens, totalCost, overviewCurrency, windowDays, sortedSubs.Count,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), sortedSubs, topModels);
+    }
 
     /// <summary>
     /// Runs `codexbar usage --json` and parses its provider quota snapshot.

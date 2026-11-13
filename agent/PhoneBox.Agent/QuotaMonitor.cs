@@ -28,8 +28,10 @@ public sealed record QuotaProvider(string Id, string Name, string Plan, IReadOnl
 ///  - Codex: the last "rate_limits" record in the newest rollout file under ~/.codex/sessions (fully local).
 ///  - Antigravity: a running local server, or the signed-in agy CLI's structured /usage command.
 /// </summary>
-public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : BackgroundService
+public sealed partial class QuotaMonitor(ConfigStore config, ILogger<QuotaMonitor> log) : BackgroundService
 {
+    internal QuotaMonitor(ILogger<QuotaMonitor> log) : this(null!, log) { }
+
     private static readonly string Home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
@@ -40,6 +42,7 @@ public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : Background
     private long _nextCodexBar;
     private long _nextAntigravity;
     private volatile IReadOnlyList<QuotaProvider> _external = [];
+    private volatile QuotaOverview? _overview;
 
     /// <summary>Seeds quota state in unit tests without running background loops.</summary>
     internal void SetStateForTest(QuotaProvider? claude = null, IReadOnlyList<QuotaProvider>? external = null)
@@ -76,12 +79,75 @@ public sealed partial class QuotaMonitor(ILogger<QuotaMonitor> log) : Background
         return p with { Limits = limits, Extra = extra };
     }
 
+    /// <summary>Returns true when an enabled page shows a quota widget with cost overview enabled.</summary>
+    internal bool IsOverviewEnabled() => config?.Get().ShowQuotaOverview() == true;
+
+    /// <summary>Returns the current cost overview when enabled and still within the 1-hour freshness window.</summary>
+    public QuotaOverview? Overview() => Overview(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
+    /// <summary>Returns the current cost overview evaluated at <paramref name="now"/>.</summary>
+    internal QuotaOverview? Overview(long now) => CodexBar.SelectOverview(_overview, IsOverviewEnabled(), now);
+
     /// <summary>
-    /// Periodically refreshes local and CodexBar quota providers in the background.
+    /// Periodically refreshes local/CodexBar quota providers and gated cost overview in the background.
     /// </summary>
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("PhoneBox/" + AppPaths.Version);
+        await Task.WhenAll(RunUsageLoopAsync(ct), RunOverviewLoopAsync(ct));
+    }
+
+    private async Task RunOverviewLoopAsync(CancellationToken ct)
+    {
+        long next = 0;
+        var wakes = Wake.Count;
+        while (!ct.IsCancellationRequested)
+        {
+            if (!IsOverviewEnabled())
+            {
+                _overview = null;
+                next = 0;
+            }
+            else if (Environment.TickCount64 >= next || Wake.Count != wakes)
+            {
+                wakes = Wake.Count;
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var ok = await RefreshOverviewOnceAsync(() => ToolProcess.Find("codexbar"), CodexBar.ReadCostAsync, now, ct);
+                next = Environment.TickCount64 + (ok ? 1_200_000 : 300_000);
+            }
+            await Wake.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+    }
+
+    /// <summary>Refreshes the cost overview once when enabled, expiring cached data after one hour without a successful refresh.</summary>
+    internal async Task<bool> RefreshOverviewOnceAsync(Func<string?> findTool,
+        Func<string, CancellationToken, Task<QuotaOverview?>> readCost, long now, CancellationToken ct)
+    {
+        if (!IsOverviewEnabled())
+        {
+            _overview = null;
+            return false;
+        }
+        QuotaOverview? latest = null;
+        var path = findTool();
+        if (path is not null)
+        {
+            try { latest = await readCost(path, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) { log.LogDebug("CodexBar cost: {Message}", ex.Message); }
+        }
+        if (latest is not null)
+        {
+            _overview = latest;
+            return true;
+        }
+        if (_overview is { } old && now - old.UpdatedAt > CodexBar.OverviewStaleMs)
+            _overview = null;
+        return false;
+    }
+
+    private async Task RunUsageLoopAsync(CancellationToken ct)
+    {
         while (!ct.IsCancellationRequested)
         {
             if (Environment.TickCount64 >= _nextCodexBar)
