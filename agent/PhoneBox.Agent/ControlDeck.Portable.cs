@@ -137,9 +137,9 @@ internal sealed class PortableDeckNative(
         string[] args = kind switch
         {
             "ffplay" => ["-nodisp", "-autoexit", "-vn", "-sn", "-loglevel", "error", "-volume", clamped.ToString(CultureInfo.InvariantCulture), "-i", target],
-            "mpv" => ["--no-video", "--really-quiet", $"--volume={clamped.ToString(CultureInfo.InvariantCulture)}", "--", target],
+            "mpv" => ["--no-config", "--no-video", "--really-quiet", $"--volume={clamped.ToString(CultureInfo.InvariantCulture)}", "--", target],
             "afplay" => ["-v", normalizedVolume, target],
-            _ => ["--intf", "dummy", "--play-and-exit", "--no-video", "--quiet", $"--gain={normalizedVolume}", "--", target],
+            _ => ["--intf", "dummy", "--no-one-instance", "--play-and-exit", "--no-video", "--quiet", $"--gain={normalizedVolume}", "--", target],
         };
         foreach (var arg in args) start.ArgumentList.Add(arg);
         return start;

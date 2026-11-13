@@ -11,10 +11,10 @@ public sealed class PortableAudioPlaybackTests
         Assert.Equal(["-nodisp", "-autoexit", "-vn", "-sn", "-loglevel", "error", "-volume", "35", "-i", "https://stream.example/live.mp3"], ffplay.ArgumentList);
 
         var mpv = PortableDeckNative.BuildStartInfo("mpv", "/usr/bin/mpv", "/tmp/bell.wav", 120);
-        Assert.Equal(["--no-video", "--really-quiet", "--volume=100", "--", "/tmp/bell.wav"], mpv.ArgumentList);
+        Assert.Equal(["--no-config", "--no-video", "--really-quiet", "--volume=100", "--", "/tmp/bell.wav"], mpv.ArgumentList);
 
         var cvlc = PortableDeckNative.BuildStartInfo("cvlc", "/usr/bin/cvlc", "https://stream.example/live", 35);
-        Assert.Equal(["--intf", "dummy", "--play-and-exit", "--no-video", "--quiet", "--gain=0.35", "--", "https://stream.example/live"], cvlc.ArgumentList);
+        Assert.Equal(["--intf", "dummy", "--no-one-instance", "--play-and-exit", "--no-video", "--quiet", "--gain=0.35", "--", "https://stream.example/live"], cvlc.ArgumentList);
 
         var afplay = PortableDeckNative.BuildStartInfo("afplay", "/usr/bin/afplay", "/tmp/bell.wav", 50);
         Assert.Equal(["-v", "0.5", "/tmp/bell.wav"], afplay.ArgumentList);
