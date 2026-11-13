@@ -97,7 +97,13 @@ public sealed partial class ControlDeck
         var state = action.Kind is "task" or "server" ? _tasks.State(action.Id) : _actionResults.GetValueOrDefault(action.Id);
         var available = true;
         if (action.Kind == "service") { state = _native.ActionState(action) ?? "Service unavailable"; available = state != "Service unavailable"; }
-        if (action.Kind is "sound" or "radio") { state = _native.ActionState(action) ?? "Playback requires Windows"; available = OperatingSystem.IsWindows(); }
+        if (action.Kind is "sound" or "radio")
+        {
+            state = _native.ActionState(action);
+            if (action.Kind == "radio" && state is null && IsRadioPlaying(action)) state = "Playing";
+            available = state is not null || OperatingSystem.IsWindows();
+            state ??= "Playback requires Windows";
+        }
         if (action.Kind == "workflow" && ToolProcess.Find("gh") is null) { available = false; state = "Install GitHub CLI"; }
         if (action.Kind == "playlist" && string.IsNullOrWhiteSpace(_config.Get().Controls.SpotifyClientId) && string.IsNullOrWhiteSpace(_config.Get().Controls.SpotifyToken)) { available = false; state = "Connect Spotify in desktop settings"; }
         if (action.Kind == "midi" && (!int.TryParse(action.Device, out var midiPort) || !_midi.Any(p => p.Id == midiPort.ToString()))) { available = false; state = "MIDI port unavailable"; }

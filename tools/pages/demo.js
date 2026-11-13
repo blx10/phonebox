@@ -411,7 +411,11 @@
       const a = (c.controls?.actions || []).find(x => x.id === id); if (!a) return { ok: false, error: 'Control is not configured' };
       if (a.kind === 'server') actionState[id] = op === 'stop' ? 'Stopped' : 'Running';
       else if (a.kind === 'task') { actionState[id] = 'Running'; setTimeout(() => { actionState[id] = 'Finished'; }, 4000); }
-      else if (a.kind === 'sound' || a.kind === 'radio') actionState[id] = 'Playing';
+      else if (a.kind === 'radio') {
+        const stop = op === 'stop' || (op === 'toggle' && actionState[id] === 'Playing');
+        for (const r of (c.controls?.actions || []).filter(x => x.kind === 'radio')) actionState[r.id] = 'Stopped';
+        if (!stop) actionState[id] = 'Playing';
+      } else if (a.kind === 'sound') actionState[id] = 'Playing';
     } else if (kind === 'sound-stop') { for (const a of c.controls?.actions || []) if ((!id || a.id === id) && actionState[a.id] === 'Playing') delete actionState[a.id]; }
     else if (kind === 'power-arm' || kind === 'power') return { ok: false, error: 'Power controls are disabled in desktop settings' };
     else if (!['desktop', 'lock', 'monitor-off'].includes(kind)) return { ok: false, error: 'Unknown control' };

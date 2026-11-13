@@ -206,11 +206,11 @@ function actionsView(box, options, type) {
     if (!items.length) { empty(grid, 'Assign controls in the computer’s Control Deck settings'); return; }
     grid.replaceChildren(...items.map(item => {
       const label = h('span', '', item.name), state = h('small', '', item.state || 'Ready');
-      const b = button('', async () => { await deckCommand(item.kind === 'profile' ? 'profile' : 'action', { id: item.id, op: type === 'app-dock' ? 'focus' : '' }); signature = ''; });
+      const b = button('', async () => { await deckCommand(item.kind === 'profile' ? 'profile' : 'action', { id: item.id, op: item.kind === 'radio' ? 'toggle' : (type === 'app-dock' ? 'focus' : '') }); signature = ''; });
       b.disabled = item.available === false;
       b.append(label, state);
       if (type === 'dev-servers') return h('div', 'deck-task', b, button('Stop', () => deckCommand('action', { id: item.id, op: 'stop' }), 'Stop ' + item.name));
-      if (type === 'soundboard' || type === 'radio') return h('div', 'deck-task', b, button('Stop', () => deckCommand('sound-stop', { id: item.id }), 'Stop ' + item.name));
+      if (type === 'soundboard') return h('div', 'deck-task', b, button('Stop', () => deckCommand('sound-stop', { id: item.id }), 'Stop ' + item.name));
       return b;
     }));
   };
