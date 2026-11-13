@@ -62,6 +62,7 @@ internal interface IDeckNative : IDisposable
     string? ActionState(DeckAction action) => null;
     Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct);
     Task<bool> MediaAction(string id, string action, long value, CancellationToken ct);
+    Task<bool> PauseCurrentMedia(CancellationToken ct) => Task.FromResult(false);
     void Play(string id, string file, string? device, int volume);
     void StopSound(string? id);
     IReadOnlyList<DeckItem> MidiPorts();

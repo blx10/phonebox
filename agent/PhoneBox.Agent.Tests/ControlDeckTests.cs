@@ -197,6 +197,53 @@ public sealed class ControlDeckTests
             using var cancelledCts = new CancellationTokenSource();
             cancelledCts.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => deck.TryControlRadioMediaAsync("next", idleSys, cancelledCts.Token));
+
+            // 12. Starting a radio pauses ONLY the current Now Playing session after Play succeeds (not on failure, not background/other-window sessions).
+            native.FailingRadios.Clear();
+            native.FailingRadios.Add("r-power");
+            native.MediaSessions =
+            [
+                new DeckMedia("chrome.exe", "Chrome", "Tab 1 (paused)", false, 0, 100_000, true, false, false, false, "None"),
+                new DeckMedia("chrome.exe", "Chrome", "Tab 2 (active)", true, 1_000, 100_000, true, false, false, false, "None"),
+                new DeckMedia("vlc.exe", "VLC", "Background", true, 2_000, 100_000, true, false, false, false, "None"),
+            ];
+            native.CurrentSessionIndex = 1;
+            native.PausedSessionIndices.Clear();
+
+            Assert.False((await deck.Act("action", "r-power", "", null, null, null, default)).Ok);
+            Assert.Empty(native.PausedSessionIndices);
+
+            Assert.True((await deck.Act("action", "r-kafa", "", null, null, null, default)).Ok);
+            Assert.Equal([1], native.PausedSessionIndices.ToArray());
+            Assert.False(native.MediaSessions[1].Playing);
+            Assert.True(native.MediaSessions[2].Playing);
+
+            // 13. Unsupported "play" op is rejected without stopping radio; "playpause" on a non-playing session stops active radio.
+            native.MediaSessions =
+            [
+                new DeckMedia("Spotify.exe", "Spotify", "Song", false, 0, 100_000, true, true, true, false, "None"),
+            ];
+            native.CurrentSessionIndex = 0;
+            Assert.False((await deck.Act("media", "Spotify.exe", "play", null, null, null, default)).Ok);
+            Assert.Equal(["r-kafa"], native.PlayingRadios.ToArray());
+
+            native.MediaQueryCount = 0;
+            Assert.True((await deck.Act("media", "Spotify.exe", "seek", 5_000, null, null, default)).Ok);
+            Assert.True((await deck.Act("media", "Spotify.exe", "shuffle", 1, null, null, default)).Ok);
+            Assert.True((await deck.Act("media", "Spotify.exe", "repeat", 1, null, null, default)).Ok);
+            Assert.Equal(0, native.MediaQueryCount);
+            Assert.Equal(["r-kafa"], native.PlayingRadios.ToArray());
+
+            Assert.True((await deck.Act("media", "Spotify.exe", "playpause", null, null, null, default)).Ok);
+            Assert.Equal(1, native.MediaQueryCount);
+            Assert.Empty(native.PlayingRadios);
+
+            // 14. Next on an already-playing media control stops active radio without enumerating all media sessions.
+            Assert.True((await deck.Act("action", "r-kafa", "", null, null, null, default)).Ok);
+            native.MediaQueryCount = 0;
+            Assert.True((await deck.Act("media", "Spotify.exe", "next", null, null, null, default)).Ok);
+            Assert.Equal(0, native.MediaQueryCount);
+            Assert.Empty(native.PlayingRadios);
         }
         finally
         {
@@ -312,6 +359,10 @@ public sealed class ControlDeckTests
         private readonly Lock _gate = new();
         public readonly HashSet<string> PlayingRadios = [];
         public readonly HashSet<string> FailingRadios = [];
+        public List<DeckMedia> MediaSessions = [];
+        public int CurrentSessionIndex = -1;
+        public readonly List<int> PausedSessionIndices = [];
+        public int MediaQueryCount;
         public ManualResetEventSlim? BlockPlayGate;
         public readonly ManualResetEventSlim PlayEnteredGate = new(false);
 
@@ -338,8 +389,40 @@ public sealed class ControlDeckTests
             if (action.Kind is not ("sound" or "radio")) return null;
             lock (_gate) return PlayingRadios.Contains(action.Id) ? "Playing" : "Stopped";
         }
-        public Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct) => Task.FromResult<IReadOnlyList<DeckMedia>>([]);
-        public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct) => Task.FromResult(true);
+        public Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct)
+        {
+            MediaQueryCount++;
+            return Task.FromResult<IReadOnlyList<DeckMedia>>(MediaSessions);
+        }
+        public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct)
+        {
+            var idx = CurrentSessionIndex >= 0 && CurrentSessionIndex < MediaSessions.Count && MediaSessions[CurrentSessionIndex].Id == id
+                ? CurrentSessionIndex
+                : MediaSessions.FindIndex(m => m.Id == id);
+            if (idx < 0) return Task.FromResult(false);
+            switch (action)
+            {
+                case "pause":
+                    PausedSessionIndices.Add(idx);
+                    MediaSessions[idx] = MediaSessions[idx] with { Playing = false };
+                    return Task.FromResult(true);
+                case "playpause":
+                    MediaSessions[idx] = MediaSessions[idx] with { Playing = !MediaSessions[idx].Playing };
+                    return Task.FromResult(true);
+                case "next" or "prev" or "seek" or "shuffle" or "repeat":
+                    return Task.FromResult(true);
+                default:
+                    return Task.FromResult(false);
+            }
+        }
+        public Task<bool> PauseCurrentMedia(CancellationToken ct)
+        {
+            if (CurrentSessionIndex < 0 || CurrentSessionIndex >= MediaSessions.Count) return Task.FromResult(false);
+            if (!MediaSessions[CurrentSessionIndex].Playing) return Task.FromResult(false);
+            PausedSessionIndices.Add(CurrentSessionIndex);
+            MediaSessions[CurrentSessionIndex] = MediaSessions[CurrentSessionIndex] with { Playing = false };
+            return Task.FromResult(true);
+        }
         public void Play(string id, string file, string? device, int volume)
         {
             lock (_gate)

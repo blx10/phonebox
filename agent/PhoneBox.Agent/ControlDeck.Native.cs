@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 namespace PhoneBox.Agent;
 
-internal sealed partial class WindowsDeckNative : IDeckNative
+internal sealed partial class WindowsDeckNative(MediaMonitor? mediaMonitor = null) : IDeckNative
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, (WasapiPlayer Output, WaveStream Reader, MMDevice Device)> _sounds = [];
@@ -172,7 +172,8 @@ internal sealed partial class WindowsDeckNative : IDeckNative
     public async Task<bool> MediaAction(string id, string action, long value, CancellationToken ct)
     {
         _media ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-        var s = _media.GetSessions().FirstOrDefault(s => s.SourceAppUserModelId == id);
+        var cur = _media.GetCurrentSession();
+        var s = (cur?.SourceAppUserModelId == id ? cur : null) ?? _media.GetSessions().FirstOrDefault(x => x.SourceAppUserModelId == id);
         if (s is null) return false;
         ct.ThrowIfCancellationRequested();
         return action switch
@@ -187,6 +188,18 @@ internal sealed partial class WindowsDeckNative : IDeckNative
                 await s.TryChangeAutoRepeatModeAsync((MediaPlaybackAutoRepeatMode)value),
             _ => false,
         };
+    }
+
+    public async Task<bool> PauseCurrentMedia(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (mediaMonitor is not null) return await mediaMonitor.PauseAsync();
+        _media ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+        var s = _media.GetCurrentSession();
+        if (s is null || s.GetPlaybackInfo().PlaybackStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+            return false;
+        ct.ThrowIfCancellationRequested();
+        return await s.TryPauseAsync();
     }
 
     public void Play(string id, string file, string? device, int volume)
