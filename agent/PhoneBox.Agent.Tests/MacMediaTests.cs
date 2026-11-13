@@ -43,6 +43,13 @@ public sealed class MacMediaTests
         var replacedArt = monitor.ReadMacSystemMedia(template.Replace("__ART__", $$""" ,"kMRMediaRemoteNowPlayingInfoArtworkData":"{{pngTwo}}" """)).Item1!;
         Assert.Equal(2, replacedArt.ArtId);
 
+        var failedDecode = monitor.ReadMacSystemMedia(template.Replace("__ART__", $$""" ,"kMRMediaRemoteNowPlayingInfoArtworkData":"not-valid-base64!!!" """)).Item1!;
+        Assert.Equal(0, failedDecode.ArtId);
+        Assert.Null(monitor.Art);
+
+        var recoveredArt = monitor.ReadMacSystemMedia(template.Replace("__ART__", $$""" ,"kMRMediaRemoteNowPlayingInfoArtworkData":"{{pngTwo}}" """)).Item1!;
+        Assert.Equal(3, recoveredArt.ArtId);
+
         var clearedArt = monitor.ReadMacSystemMedia(template.Replace("__ART__", "")).Item1!;
         Assert.Equal(0, clearedArt.ArtId);
         Assert.Null(monitor.Art);

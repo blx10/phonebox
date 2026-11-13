@@ -10,6 +10,7 @@ namespace PhoneBox.Agent;
 public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private readonly SemaphoreSlim _pollGate = new(1, 1);
     private volatile MediaSnapshot? _snap;
     private string _artUrl = "";
     private int _artId;
@@ -40,22 +41,30 @@ public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
 
     private async Task Poll()
     {
-        var (snap, art) = OperatingSystem.IsMacOS() ? ReadMac() : ReadLinux();
-        if (snap is null) { _snap = null; Art = null; _macArtKey = ""; _macArtEncoded = ""; _artUrl = ""; return; }
-        if (_macSystemMedia)
+        await _pollGate.WaitAsync();
+        try
         {
+            var (snap, art) = OperatingSystem.IsMacOS() ? ReadMac() : ReadLinux();
+            if (snap is null) { _snap = null; Art = null; _macArtKey = ""; _macArtEncoded = ""; _artUrl = ""; return; }
+            if (_macSystemMedia)
+            {
+                _snap = snap with { ArtId = Art is null ? 0 : _artId };
+                return;
+            }
+            if (_macArtKey.Length > 0) { _macArtKey = ""; _macArtEncoded = ""; _artUrl = "\0"; }
+            if (art != _artUrl)
+            {
+                _artUrl = art;
+                var loaded = await LoadArt(art);
+                if (loaded is null) Art = null;
+                else if (Art is null || Art.Mime != loaded.Mime || !Art.Bytes.AsSpan().SequenceEqual(loaded.Bytes)) { Art = loaded; _artId++; }
+            }
             _snap = snap with { ArtId = Art is null ? 0 : _artId };
-            return;
         }
-        if (_macArtKey.Length > 0) { _macArtKey = ""; _macArtEncoded = ""; _artUrl = "\0"; }
-        if (art != _artUrl)
+        finally
         {
-            _artUrl = art;
-            var loaded = await LoadArt(art);
-            if (loaded is null) Art = null;
-            else if (Art is null || Art.Mime != loaded.Mime || !Art.Bytes.AsSpan().SequenceEqual(loaded.Bytes)) { Art = loaded; _artId++; }
+            _pollGate.Release();
         }
-        _snap = snap with { ArtId = Art is null ? 0 : _artId };
     }
 
     // ---------------------------------------------------------------- Linux: playerctl (MPRIS)
@@ -151,10 +160,17 @@ public sealed class MediaMonitor(ILogger<MediaMonitor> log) : BackgroundService
             }
             else if (encoded != _macArtEncoded)
             {
-                _macArtEncoded = encoded;
                 var nextArt = DecodeMacArt(encoded);
-                if (nextArt is null) Art = null;
-                else if (Art is null || Art.Mime != nextArt.Mime || !Art.Bytes.AsSpan().SequenceEqual(nextArt.Bytes)) { Art = nextArt; _artId++; }
+                if (nextArt is null)
+                {
+                    _macArtEncoded = "";
+                    Art = null;
+                }
+                else
+                {
+                    _macArtEncoded = encoded;
+                    if (Art is null || Art.Mime != nextArt.Mime || !Art.Bytes.AsSpan().SequenceEqual(nextArt.Bytes)) { Art = nextArt; _artId++; }
+                }
             }
             return (new MediaSnapshot(app, title, Str("Artist"), Str("Album"), playing,
                 _macPositionMs, durationMs, Art is null ? 0 : _artId, duration > 0), "");
