@@ -1,7 +1,11 @@
-import { API, PANEL_HEADERS, api, h, haptic, toast, store } from '../main.js';
+import { API, PANEL_HEADERS, api, applyState, D, evSeq, h, haptic, toast, store } from '../main.js';
 import { W } from '../registry.js';
 
 let cached = null, at = 0, epoch = 0, pending = null;
+export function invalidateDeckState() {
+  epoch++;
+  at = 0;
+}
 export async function deckState(force = false) {
   if (!force && cached && performance.now() - at < 650) return cached;
   if (!force && pending) return pending;
@@ -19,6 +23,11 @@ export async function deckCommand(kind, values = {}) {
   epoch++; at = 0;
   const result = await api(`/controls/command/${encodeURIComponent(kind)}?${query}`, 'POST', 20000);
   if (!result.ok) throw new Error(result.error || 'Control is unavailable');
+  if (kind === 'action' || kind === 'sound-stop' || kind === 'media') {
+    api('/state' + (evSeq != null ? '?ev=' + evSeq : '')).then(s => {
+      if (s && (evSeq == null || s.evSeq == null || s.evSeq >= evSeq) && (!D.state?.ts || !s.ts || s.ts >= D.state.ts)) applyState(s);
+    }).catch(() => {});
+  }
   return result;
 }
 const fail = error => toast(error?.message || 'The computer did not answer', 'err');

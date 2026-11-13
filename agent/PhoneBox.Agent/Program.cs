@@ -321,7 +321,7 @@ object State(IServiceProvider sp, long? ev)
         evSeq = push.Seq,
         events = ev is { } since ? push.Since(since) : [],
         pc = sp.GetRequiredService<SystemMonitor>().Snapshot(),
-        media = sp.GetRequiredService<MediaMonitor>().Snapshot(),
+        media = sp.GetRequiredService<ControlDeck>().EffectiveMedia(sp.GetRequiredService<MediaMonitor>().Snapshot()),
         audio = sp.GetRequiredService<AudioControl>().Snapshot(),
         ping = sp.GetRequiredService<PingMonitor>().Snapshot(),
         rules = sp.GetRequiredService<RuleEngine>().Active(),
@@ -486,8 +486,14 @@ app.MapGet("/api/phones", (ConfigStore cfg) =>
 app.MapGet("/api/art", (MediaMonitor media) =>
     media.Art is { } art ? Results.File(art.Bytes, art.Mime) : Results.NotFound());
 
-app.MapPost("/api/media/{action}", async (string action, long? ms, MediaMonitor media) =>
-    await media.Control(action, ms) ? Results.Ok() : Results.BadRequest());
+app.MapPost("/api/media/{action}", async (string action, long? ms, MediaMonitor media, ControlDeck deck, CancellationToken ct) =>
+{
+    var sysSnapshot = media.Snapshot();
+    if (await deck.TryControlRadioMediaAsync(action, sysSnapshot, ct) is { } radioHandled)
+        return radioHandled ? Results.Json(new { ok = true, media = deck.EffectiveMedia(media.Snapshot()) }) : Results.BadRequest();
+    var ok = await media.Control(action, ms);
+    return ok ? Results.Json(new { ok = true, media = deck.EffectiveMedia(media.Snapshot()) }) : Results.BadRequest();
+});
 
 app.MapPost("/api/volume", (int? level, string? op, AudioControl audio) =>
 {
