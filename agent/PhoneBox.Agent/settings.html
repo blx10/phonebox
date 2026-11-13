@@ -790,6 +790,7 @@ function widgetSummary(w) {
     case 'checklist': return `${o.title || 'Today'} · ${(o.items || d.options[1].default).length} items`;
     case 'exchange': return `${o.base || 'EUR'} → ${(o.symbols || d.options[1].default).join(', ')}`;
     case 'crypto': return (o.coins || d.options[0].default).join(', ');
+    case 'radio': return choice('view');
     case 'image': return o.caption || (o.url || 'no address').replace(/^https?:\/\//, '').slice(0, 40);
     case 'stack': {
       const list = getStackItems(w, { key: 'widgets', default: d.options?.find((x) => x.key === 'widgets')?.default });
