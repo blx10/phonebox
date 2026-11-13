@@ -173,5 +173,45 @@ public sealed class SessionDetailsTests : IDisposable
         Assert.Empty(SessionMonitor.ReadOpenClaw(_root, name => name == "claw" ? [7788] : [], pid => pid == 7788));
     }
 
+    [Fact]
+    public void ChatReadersExtractLastPromptAndReplySafelyAndTruncateLongText()
+    {
+        var claudeProjects = Path.Combine(_root, ".claude", "projects", "work");
+        Directory.CreateDirectory(claudeProjects);
+        var longPrompt = new string('p', 1700);
+        File.WriteAllText(Path.Combine(claudeProjects, "sess-1.jsonl"), string.Join("\n",
+            JsonSerializer.Serialize(new { type = "user", message = new { content = longPrompt } }),
+            JsonSerializer.Serialize(new { type = "assistant", message = new { content = new[] { new { type = "text", text = "All checks green." } } } })));
+
+        var (claudePrompt, claudeReply) = SessionMonitor.ReadClaudeChat(_root, "sess-1");
+        Assert.NotNull(claudePrompt);
+        Assert.Equal(1501, claudePrompt!.Length);
+        Assert.EndsWith("…", claudePrompt);
+        Assert.Equal("All checks green.", claudeReply);
+        Assert.Equal((null, null), SessionMonitor.ReadClaudeChat(_root, "../etc/passwd"));
+
+        var codexFile = Rollout();
+        File.AppendAllText(codexFile,
+            Line("event_msg", new { type = "user_message", message = "Fix the build warning" }) +
+            Line("event_msg", new { type = "agent_message", message = "Updated the nullable annotation." }));
+        var codexHome = Path.Combine(_root, "codex-home");
+        var codexSessDir = Path.Combine(codexHome, ".codex", "sessions", "2026", "11", "13");
+        Directory.CreateDirectory(codexSessDir);
+        File.Copy(codexFile, Path.Combine(codexSessDir, "rollout-test-1.jsonl"));
+        var (cPrompt, cReply) = SessionMonitor.ReadCodexChat(codexHome, "rollout-test-1.jsonl");
+        Assert.Equal("Fix the build warning", cPrompt);
+        Assert.Equal("Updated the nullable annotation.", cReply);
+        Assert.Equal((null, null), SessionMonitor.ReadCodexChat(codexHome, "../*.jsonl"));
+
+        var agyLogDir = Path.Combine(_root, ".gemini", "antigravity", "brain", "conv-1", ".system_generated", "logs");
+        Directory.CreateDirectory(agyLogDir);
+        File.WriteAllText(Path.Combine(agyLogDir, "transcript.jsonl"), string.Join("\n",
+            JsonSerializer.Serialize(new { type = "USER_INPUT", content = "Open PRs for remaining features" }),
+            JsonSerializer.Serialize(new { type = "PLANNER_RESPONSE", content = "Prepared PR branch cleanly." })));
+        var (agyPrompt, agyReply) = SessionMonitor.ReadAntigravityChat(_root);
+        Assert.Equal("Open PRs for remaining features", agyPrompt);
+        Assert.Equal("Prepared PR branch cleanly.", agyReply);
+    }
+
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, true); }
 }

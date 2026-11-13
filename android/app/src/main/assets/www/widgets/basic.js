@@ -446,7 +446,8 @@ W.codexbar = W.quotas;
 
 W.sessions = {
   needs: ['work', 'tick'],
-  create(box) {
+  create(box, { o }) {
+    const showMessages = o.showMessages === true;
     const sum = h('span', 'w-sum');
     const list = h('div', 's-list', h('div', 'empty', 'Waiting for session data…'));
     box.append(h('div', 'w-head', h('span', 's-label', 'Sessions'), sum), list);
@@ -484,6 +485,27 @@ W.sessions = {
         ['Recent tool', s.lastTool],
       ];
       for (const [label, value] of rows) if (value != null) panel.append(h('div', 'session-detail-row', h('span', null, label), h('strong', null, value)));
+      if (showMessages) {
+        const msgWrap = h('div', 'session-msgs', h('div', 'session-msg-loading', 'Loading conversation…'));
+        panel.append(msgWrap);
+        api(`/sessions/detail?id=${encodeURIComponent(s.id)}`).then((detail) => {
+          if (!backdrop.isConnected) return;
+          const items = [];
+          if (detail?.lastPrompt) {
+            items.push(h('div', 'session-msg-box prompt',
+              h('div', 'session-msg-lbl', 'Last prompt'),
+              h('div', 'session-msg-txt', detail.lastPrompt)));
+          }
+          if (detail?.lastResponse) {
+            items.push(h('div', 'session-msg-box response',
+              h('div', 'session-msg-lbl', 'Last reply'),
+              h('div', 'session-msg-txt', detail.lastResponse)));
+          }
+          msgWrap.replaceChildren(...(items.length ? items : [h('div', 'session-msg-empty', 'No messages found')]));
+        }).catch(() => {
+          if (backdrop.isConnected) msgWrap.replaceChildren(h('div', 'session-msg-empty', 'Conversation details unavailable'));
+        });
+      }
       if (s.tool === 'codex') panel.append(h('p', 'session-note', 'Token totals are for this local session, not your account allowance.'));
       backdrop.append(panel);
       document.body.append(backdrop);

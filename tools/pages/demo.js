@@ -517,6 +517,21 @@
       return json({ ok: true });
     }
     if (path === '/api/work') return json(work());
+    if (path === '/api/sessions/detail') {
+      const cfgObj = await config();
+      const allowMsg = (cfgObj.pages || []).some((p) => p.enabled !== false && (p.widgets || []).some((w) =>
+        (w.type === 'sessions' && w.options?.showMessages === true) ||
+        (w.options?.widgets || []).some((c) => c.enabled !== false && c.type === 'sessions' && c.options?.showMessages === true)));
+      if (!allowMsg) return json({ error: 'disabled' }, 403);
+      const id = q.get('id') || '';
+      const found = work().sessions.find((s) => s.id === id);
+      if (!found) return json({ error: 'not found' }, 404);
+      return json({
+        ...found,
+        lastPrompt: 'Summarize the failing check and propose the minimal patch.',
+        lastResponse: 'Identified the race condition in the artwork refresh loop and added unit test coverage.',
+      });
+    }
     if (path === '/api/procs') return json(procs());
     if (path === '/api/procs/detail') return json(procDetail(q.get('name')));
     if (path.startsWith('/api/widget/')) return json({ output: String(3 + Math.floor(Math.random() * 3)), at: now() - 8000, ok: true, running: false, durationMs: 412 });
