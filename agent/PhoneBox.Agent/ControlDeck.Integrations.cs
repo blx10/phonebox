@@ -99,7 +99,21 @@ public sealed partial class ControlDeck
         if (action.Kind == "service") { state = _native.ActionState(action) ?? "Service unavailable"; available = state != "Service unavailable"; }
         if (action.Kind is "sound" or "radio")
         {
-            state = _native.ActionState(action);
+            if (action.Kind == "radio")
+            {
+                if (_radioGate.TryEnter())
+                {
+                    try
+                    {
+                        state = _native.ActionState(action);
+                        if (state is not null and not "Playing") OnNativeSoundStoppedCore(action.Id);
+                    }
+                    finally { _radioGate.Exit(); }
+                }
+                else state = IsRadioPlaying(action) ? "Playing" : "Stopped";
+            }
+            else state = _native.ActionState(action);
+            // null: no player here (Linux / macOS without ffplay, mpv or vlc)
             available = OperatingSystem.IsWindows() || state is not null;
             state ??= OperatingSystem.IsWindows() ? "Playback unavailable" : "Install ffplay, mpv, or vlc";
         }

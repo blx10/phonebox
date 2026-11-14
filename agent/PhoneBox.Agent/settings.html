@@ -455,6 +455,7 @@ dd { margin: 0; word-break: break-all; }
           <select data-bind="display.orientation"><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="auto">Follow the phone</option></select>
           <span class="hint">You design pages in landscape; in portrait the panel arranges the widgets by itself, top to bottom. Tablets use the same pages, just bigger.</span></div>
         <label class="check"><input type="checkbox" data-bind="display.showSeconds"> Show seconds on the clock</label>
+        <label class="check"><input type="checkbox" data-bind="display.hour12"> 12-hour times (2:05 PM instead of 14:05)</label>
         <label class="check"><input type="checkbox" data-bind="display.vibrate"> Vibrate when a session finishes or needs input</label>
         <label class="check"><input type="checkbox" data-bind="display.volumeKeys"> The phone's volume keys switch pages</label>
         <label class="check"><input type="checkbox" data-bind="display.autoBrightness"> Brightness follows the room (light sensor)</label>
@@ -546,6 +547,7 @@ dd { margin: 0; word-break: break-all; }
           <div class="field"><label>Path to adb.exe (empty = auto-detect)</label><input type="text" data-bind="adbPath" placeholder="auto-detected"><span class="hint" id="adbFound"></span></div>
         </div>
         <p id="usbProblem" hidden style="margin:10px 0 0;font-size:13px;color:var(--warn)"></p>
+        <p id="webviewProblem" hidden style="margin:10px 0 0;font-size:13px;color:var(--warn)"></p>
       </div>
       <div class="card">
         <h3>Phones</h3>
@@ -786,6 +788,7 @@ function widgetSummary(w) {
     case 'quotaring': return `${choice('provider')} · ${choice('limit').split(' (')[0]}`;
     case 'analog': return o.label || o.zone || '';
     case 'topprocs': case 'breathe': return choice(w.type === 'topprocs' ? 'sort' : 'pattern');
+    case 'gpu': return choice('adapter');
     case 'timer': case 'counter': return o.label || '';
     case 'checklist': return `${o.title || 'Today'} · ${(o.items || d.options[1].default).length} items`;
     case 'exchange': return `${o.base || 'EUR'} → ${(o.symbols || d.options[1].default).join(', ')}`;
@@ -1273,7 +1276,7 @@ function optionField(w, o, onValChange) {
   }
   const v = optVal(w, o);
   const set = (key, val) => {
-    if (onValChange) onValChange(key, val);
+    if (onValChange) { w.options = w.options || {}; w.options[key] = val; onValChange(key, val); }
     else setWOpt(w, key, val);
   };
   const field = (...kids) => h('div', { class: 'field' }, h('label', {}, o.label), ...kids);
@@ -1285,11 +1288,43 @@ function optionField(w, o, onValChange) {
     case 'multi': {
       // read the stored value on every change: the inspector is not rebuilt between two ticks
       const cur = () => { const x = optVal(w, o); return Array.isArray(x) ? x : []; };
-      return field(h('div', { class: 'opts' }, ...o.choices.map(([k, l]) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: cur().includes(k), onchange: (e) => {
-        const next = o.choices.map((c) => c[0]).filter((x) => (x === k ? e.target.checked : cur().includes(x)));
-        set(o.key, next.length ? next : cur());
-        if (!next.length) { e.target.checked = true; toast('Keep at least one', true); }
-      } }), l))));
+      const optsBox = h('div', { class: 'opts' });
+      let currentChoices = [...(o.choices || [])];
+      const renderChoices = (choices) => {
+        currentChoices = choices;
+        const selected = cur();
+        optsBox.replaceChildren(...choices.map(([k, l]) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: selected.includes(k), onchange: (e) => {
+          const picked = new Set(cur());
+          if (e.target.checked) picked.add(k); else picked.delete(k);
+          const knownOrder = currentChoices.map((c) => c[0]).filter((x) => picked.has(x));
+          const preservedUnknown = [...picked].filter((x) => !knownOrder.includes(x));
+          const next = [...knownOrder, ...preservedUnknown];
+          if (!next.length) { e.target.checked = true; toast('Keep at least one', true); return; }
+          set(o.key, next);
+        } }), l)));
+      };
+      const withSaved = (list) => {
+        const seen = new Set(list.map((c) => c[0]));
+        const out = [...list];
+        for (const id of cur()) if (id && !seen.has(id)) { seen.add(id); out.push([id, id]); }
+        return out;
+      };
+      const baseChoices = [...(o.choices || [])];
+      renderChoices(withSaved(baseChoices));
+      if (o.key === 'providers') {
+        fetch('/api/quotas').then((r) => r.ok ? r.json() : null).then((data) => {
+          const seen = new Set(baseChoices.map((c) => c[0]));
+          const merged = [...baseChoices];
+          for (const p of (data?.providers || [])) {
+            if (p?.id && !seen.has(p.id)) {
+              seen.add(p.id);
+              merged.push([p.id, p.name || p.id]);
+            }
+          }
+          renderChoices(withSaved(merged));
+        }).catch(() => {});
+      }
+      return field(optsBox);
     }
     case 'control-target': {
       let selected = v;
@@ -1385,10 +1420,12 @@ function renderPhones() {
     const conf = cfg.phones.find((x) => x.id === ph.id);
     const chosen = conf?.pages || null;
     const all = !chosen?.length;
+    const wvMajor = ph.webView ? ph.webView.split('/')[1]?.split(/[.-]/)[0] : '';
     return h('div', { class: 'phone-row' },
       h('div', { class: 'row' },
         h('input', { type: 'text', value: conf?.name || '', placeholder: ph.model || 'Phone', style: { maxWidth: '220px' }, oninput: (e) => { entry(ph.id).name = e.target.value; changed(); } }),
-        h('span', { class: 'hint' }, `${ph.model || 'Android device'} · ${ago(ph.lastSeen)}${ph.via ? ' over ' + ph.via : ''}`)),
+        h('span', { class: 'hint' }, `${ph.model || 'Android device'} · ${ago(ph.lastSeen)}${ph.via ? ' over ' + ph.via : ''}${wvMajor ? ' · WebView ' + wvMajor : ''}`)),
+      ph.webviewProblem ? h('p', { class: 'hint', style: { margin: '6px 0 0', color: 'var(--warn)' } }, '⚠ ' + ph.webviewProblem) : null,
       h('label', { class: 'check', style: { marginTop: '8px' } },
         h('input', { type: 'checkbox', checked: all, onchange: (e) => { entry(ph.id).pages = e.target.checked ? null : cfg.pages.map((p) => p.id).filter(Boolean); changed(); renderPhones(); } }),
         'Shows all pages'),
@@ -1904,17 +1941,114 @@ function renderControlSettings() {
     btn('Disconnect Spotify',async()=>{await request('spotify/disconnect');auth.textContent='Disconnected';}));
   root.append(spotify);
   const integration=h('details',{},h('summary',{},'Optional audio integrations'),field('SoundVolumeView executable path',c,'mixerExecutable'),field('Installed Voicemeeter Remote DLL path (64-bit)',c,'mixerLibrary'));root.append(integration);
-  const hints={shortcut:'Target: existing shortcut ID.',app:'Target: application shortcut ID.',macro:'Target: macro shortcut ID.',snippet:'Target: text shortcut ID.',meeting:'Target: meeting shortcut ID.',discord:'Target: Discord shortcut ID.',focus:'Target: work/focus macro shortcut ID.',project:'Target: folder/project shortcut ID.',keys:'Target: chord, e.g. Ctrl+Shift+M.',text:'Target: text to type.',task:'Target: executable shortcut ID. Output remains on the computer.',server:'Target: executable shortcut ID. Stop affects only the process started by this control.',sound:'Target: full sound file path. Device: output ID. Value: volume 0–100.',radio:'Target: direct HTTP(S) stream URL. Device: output ID. Value: volume 0–100.',playlist:'Target: spotify:playlist:… (also album, track or episode).',midi:'Target: hex MIDI bytes, e.g. B0 07 {value}. Device: numeric output port. Value: 0–127.',osc:'Target: OSC address, e.g. /volume. Device: host:port. Value: whole number (sent as an OSC float).',service:'Target: Windows service name. Argument: start, stop, restart.',workflow:'Target: owner/repo. Argument: workflow filename. Device: optional branch/ref.','window-layout':'Target: process name. Argument: left, right, center, max.','display-profile':'Target: monitor ID. Argument: JSON with width, height, hz, optional x/y.','audio-route':'Target: process.exe. Device: output ID. Requires SoundVolumeView.',mixer:'Target: Strip[0].Gain or Bus[0].Gain. Value: −60 to 12 dB.','mixer-mute':'Target: Strip[0].Mute (or supported toggle). Value: 0 or 1.',presentation:'Target: POWERPNT or soffice. Argument: start, next, prev, end, blank.'};
-  const actions=h('div');root.append(h('h4',{},'Control bindings'),actions);
-  const renderActions=()=>actions.replaceChildren(...c.actions.map(a=>{
-    const box=h('details',{},h('summary',{},a.label || a.id));
-    const kind=h('select',{'aria-label':'Control kind'},...Object.keys(hints).map(k=>h('option',{value:k,selected:a.kind===k},k)));
-    const hint=h('p',{class:'hint'},hints[a.kind] || 'Select a kind.');kind.onchange=()=>{a.kind=kind.value;hint.textContent=hints[a.kind];changed();};
-    box.append(field('Control ID',a,'id'),field('Control label',a,'label'),h('label',{},'Kind'),kind,hint,field('Target',a,'target'),field('Argument',a,'argument'),field('Device / port / branch',a,'device'),field('Value',a,'value','number'));
-    const output=h('pre',{style:{maxHeight:'240px',overflow:'auto',whiteSpace:'pre-wrap'}});
-    box.append(btn('Show task output',async()=>{const r=await fetch('/api/controls/task-output/'+encodeURIComponent(a.id));if(!r.ok)throw new Error('Output unavailable');output.textContent=await r.text();}),btn('Remove control',()=>{c.actions=c.actions.filter(x=>x!==a);changed();renderActions();}),output);return box;
-  }));renderActions();
-  root.append(btn('Add control',()=>{c.actions.push({id:'control-'+crypto.randomUUID().slice(0,8),label:'New control',kind:'shortcut',target:'',value:75});changed();renderActions();actions.lastChild.open=true;}));
+  const hints={shortcut:'Target: existing shortcut ID.',app:'Target: application shortcut ID.',macro:'Target: macro shortcut ID.',snippet:'Target: text shortcut ID.',meeting:'Target: meeting shortcut ID.',discord:'Target: Discord shortcut ID.',focus:'Target: work/focus macro shortcut ID.',project:'Target: folder/project shortcut ID.',keys:'Target: chord, e.g. Ctrl+Shift+M.',text:'Target: text to type.',task:'Target: executable shortcut ID. Output remains on the computer.',server:'Target: executable shortcut ID. Stop affects only the process started by this control.',sound:'Target: full sound file path. Device: output ID. Value: volume 0–100.',radio:'Target: direct HTTP(S) stream or Windows-only HLS (.m3u8) URL. Device: output ID. Value: volume 0–100.',playlist:'Target: spotify:playlist:… (also album, track or episode).',midi:'Target: hex MIDI bytes, e.g. B0 07 {value}. Device: numeric output port. Value: 0–127.',osc:'Target: OSC address, e.g. /volume. Device: host:port. Value: whole number (sent as an OSC float).',service:'Target: Windows service name. Argument: start, stop, restart.',workflow:'Target: owner/repo. Argument: workflow filename. Device: optional branch/ref.','window-layout':'Target: process name. Argument: left, right, center, max.','display-profile':'Target: monitor ID. Argument: JSON with width, height, hz, optional x/y.','audio-route':'Target: process.exe. Device: output ID. Requires SoundVolumeView.',mixer:'Target: Strip[0].Gain or Bus[0].Gain. Value: −60 to 12 dB.','mixer-mute':'Target: Strip[0].Mute (or supported toggle). Value: 0 or 1.',presentation:'Target: POWERPNT or soffice. Argument: start, next, prev, end, blank.'};
+  const stationFilter = h('input', { type: 'search', placeholder: 'Filter stations…', style: { marginBottom: '6px' } });
+  const stationList = h('div', { class: 'stack-list' });
+  const radioDetails = h('details', {}, h('summary', {}, 'Radio stations (enable & order)'),
+    h('p', { class: 'hint' }, 'Order and enablement apply to all Radio widgets using the configured stations below.'),
+    stationFilter, stationList);
+  root.append(radioDetails);
+  const actions = h('div'); root.append(h('h4', {}, 'Control bindings'), actions);
+
+  let renderStations = () => {};
+  const moveRadio = (fromIdx, toIdx) => {
+    const radios = c.actions.filter((a) => a.kind === 'radio');
+    if (fromIdx < 0 || fromIdx >= radios.length || toIdx < 0 || toIdx >= radios.length || fromIdx === toIdx) return;
+    const [moved] = radios.splice(fromIdx, 1);
+    radios.splice(toIdx, 0, moved);
+    let rPtr = 0;
+    c.actions = c.actions.map((a) => (a.kind === 'radio' ? radios[rPtr++] : a));
+    changed();
+    renderStations();
+    renderActions();
+  };
+
+  renderStations = () => {
+    const radios = c.actions.filter((a) => a.kind === 'radio');
+    const q = stationFilter.value.trim().toLowerCase();
+    const visible = q ? radios.filter((r) => (r.label || r.id || '').toLowerCase().includes(q)) : radios;
+    if (!visible.length) {
+      stationList.replaceChildren(h('p', { class: 'hint', style: { margin: '6px 0' } }, radios.length ? 'No matching radio stations.' : 'No radio stations configured yet.'));
+      return;
+    }
+    stationList.replaceChildren(...visible.map((station) => {
+      const idx = radios.indexOf(station);
+      const isEnabled = station.enabled !== false;
+      const row = h('div', {
+        class: 'stack-row' + (isEnabled ? '' : ' off'),
+        draggable: !q ? 'true' : null,
+        ondragstart: (e) => {
+          if (q || e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') { e.preventDefault(); return; }
+          row.classList.add('dragging');
+          e.dataTransfer.setData('application/phonebox-radio-idx', String(idx));
+          e.dataTransfer.effectAllowed = 'move';
+        },
+        ondragend: () => {
+          row.classList.remove('dragging');
+          stationList.querySelectorAll('.stack-row.over').forEach((el) => el.classList.remove('over'));
+        },
+        ondragover: (e) => {
+          if (q) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          row.classList.add('over');
+        },
+        ondragleave: () => row.classList.remove('over'),
+        ondrop: (e) => {
+          if (q) return;
+          e.preventDefault();
+          e.stopPropagation();
+          row.classList.remove('over');
+          const fromIdx = parseInt(e.dataTransfer.getData('application/phonebox-radio-idx'), 10);
+          if (!Number.isNaN(fromIdx) && fromIdx !== idx) moveRadio(fromIdx, idx);
+        }
+      },
+        h('span', { class: 'stack-row-handle', title: q ? 'Clear search to drag' : 'Drag to reorder' }, '⋮⋮'),
+        h('input', {
+          type: 'checkbox',
+          class: 'stack-row-check',
+          checked: isEnabled,
+          title: isEnabled ? 'Enabled' : 'Disabled',
+          onchange: (e) => {
+            e.stopPropagation();
+            station.enabled = e.target.checked;
+            changed();
+            renderStations();
+            renderActions();
+          }
+        }),
+        h('span', { class: 'stack-row-ico' }, '📻'),
+        h('span', { class: 'stack-row-name', title: station.target || '' }, station.label || station.id),
+        h('div', { class: 'stack-row-actions' },
+          h('button', { type: 'button', class: 'stack-btn-sm', title: 'Move up', disabled: !!q || idx === 0, onclick: (e) => { e.stopPropagation(); moveRadio(idx, idx - 1); } }, '▲'),
+          h('button', { type: 'button', class: 'stack-btn-sm', title: 'Move down', disabled: !!q || idx === radios.length - 1, onclick: (e) => { e.stopPropagation(); moveRadio(idx, idx + 1); } }, '▼')
+        )
+      );
+      return row;
+    }));
+  };
+  stationFilter.oninput = () => renderStations();
+
+  const renderActions = () => {
+    actions.replaceChildren(...c.actions.map((a) => {
+      if (a.enabled === undefined) a.enabled = true;
+      const box = h('details', {}, h('summary', {}, a.label || a.id));
+      const kind = h('select', { 'aria-label': 'Control kind' }, ...Object.keys(hints).map((k) => h('option', { value: k, selected: a.kind === k }, k)));
+      const hint = h('p', { class: 'hint' }, hints[a.kind] || 'Select a kind.');
+      kind.onchange = () => { a.kind = kind.value; hint.textContent = hints[a.kind]; changed(); renderStations(); };
+      const enField = field('Enabled', a, 'enabled', 'checkbox');
+      enField.querySelector('input').addEventListener('change', () => renderStations());
+      const lblField = field('Control label', a, 'label');
+      lblField.querySelector('input').addEventListener('change', () => renderStations());
+      box.append(enField, field('Control ID', a, 'id'), lblField, h('label', {}, 'Kind'), kind, hint, field('Target', a, 'target'), field('Argument', a, 'argument'), field('Device / port / branch', a, 'device'), field('Value', a, 'value', 'number'));
+      const output = h('pre', { style: { maxHeight: '240px', overflow: 'auto', whiteSpace: 'pre-wrap' } });
+      box.append(btn('Show task output', async () => { const r = await fetch('/api/controls/task-output/' + encodeURIComponent(a.id)); if (!r.ok) throw new Error('Output unavailable'); output.textContent = await r.text(); }), btn('Remove control', () => { c.actions = c.actions.filter((x) => x !== a); changed(); renderActions(); }), output);
+      return box;
+    }));
+    renderStations();
+  };
+  renderActions();
+  root.append(btn('Add control', () => { c.actions.push({ id: 'control-' + crypto.randomUUID().slice(0, 8), label: 'New control', kind: 'shortcut', target: '', value: 75, enabled: true }); changed(); renderActions(); actions.lastChild.open = true; }));
   root.append(h('details',{},h('summary',{},'Available shortcut IDs'),h('p',{class:'hint'},'Create executable, text and macro shortcuts in Deck first.'),...cfg.shortcuts.map(s=>h('div',{},s.id+' — '+s.label))));
   const profiles=h('div');root.append(h('h4',{},'Audio and routine profiles'),profiles);
   const renderProfiles=()=>profiles.replaceChildren(...c.profiles.map(p=>{
@@ -1954,14 +2088,24 @@ function appearanceEditor(owner, parents, label, widget = false) {
     } }, ...[['', 'Inherit / current look'], ['default', 'Original appearance'], ['cards', 'Rounded cards'], ['flat', 'Flat surfaces'], ['borderless', 'Content only'], ['seamless', 'Seamless panel']]
       .map(([value, text]) => h('option', { value, selected: (owner.appearance?.style || '') === value }, text)));
     const fields = [h('div', { class: 'field' }, h('label', {}, 'Surface style'), style)];
-    const numeric = (key, title, max, fallback) => {
+    const fontLabels = { default: 'Original font', sans: 'Sans-serif', rounded: 'Rounded', condensed: 'Condensed', serif: 'Serif', mono: 'Monospace' };
+    const inheritedFont = (() => {
+      const inherited = { ...(owner.appearance || {}) }; delete inherited.font;
+      return PhoneBoxAppearance.resolve(...parents(), inherited).font;
+    })();
+    fields.push(h('div', { class: 'field' }, h('label', {}, 'Font'),
+      h('select', { 'aria-label': 'Font', onchange: e => { set('font', e.target.value || null); render(); } },
+        h('option', { value: '', selected: owner.appearance?.font == null }, !inheritedFont || inheritedFont === 'default' ? 'Original widget font' : 'Inherit (' + fontLabels[inheritedFont] + ')'),
+        ...Object.entries(fontLabels).map(([value, text]) => h('option', { value, selected: owner.appearance?.font === value }, text)))));
+    const numeric = (key, title, max, fallback, min = 0, step = 1, unit = ' px') => {
       const value = current[key];
-      const output = h('output', { style: { minWidth: '80px', fontVariantNumeric: 'tabular-nums' } }, value == null ? 'Automatic' : value + ' px');
-      const input = h('input', { type: 'range', min: 0, max, step: 1, value: value ?? fallback, 'aria-label': title, style: { flex: '1', minWidth: '60px' } });
-      input.oninput = () => { set(key, Number(input.value)); output.textContent = input.value + ' px'; };
+      const output = h('output', { style: { minWidth: '80px', fontVariantNumeric: 'tabular-nums' } }, value == null ? 'Automatic' : value + unit);
+      const input = h('input', { type: 'range', min, max, step, value: value ?? fallback, 'aria-label': title, style: { flex: '1', minWidth: '60px' } });
+      input.oninput = () => { set(key, Number(input.value)); output.textContent = input.value + unit; };
       const reset = h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Inherit ' + title.toLowerCase(), onclick: () => { set(key, null); render(); } }, 'Inherit');
       fields.push(h('div', { class: 'field' }, h('label', {}, title), h('div', { class: 'row', style: { gap: '10px' } }, input, output, reset)));
     };
+    numeric('fontScale', 'Font size', 200, 100, 50, 5, '%');
     numeric('radius', 'Corner radius', 32, 16);
     if (!widget) numeric('gap', 'Widget spacing', 24, 8);
     numeric('padding', 'Widget inner padding', 24, 12);
@@ -2078,6 +2222,8 @@ async function loadInfo() {
     $('appMissing').hidden = !(i.appMissing && i.appMissing.length);
     $('usbProblem').hidden = !i.usbProblem;
     $('usbProblem').textContent = i.usbProblem ? '⚠ ' + i.usbProblem : '';
+    $('webviewProblem').hidden = !i.webviewProblem;
+    $('webviewProblem').textContent = i.webviewProblem ? '⚠ ' + i.webviewProblem : '';
     if (i.appMissing?.length) $('appMissingText').textContent = `${i.appMissing.join(', ')} has no PhoneBox app yet`;
     const sel = $('serial');
     const cur = cfg.deviceSerial || '';

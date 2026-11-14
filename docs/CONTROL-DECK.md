@@ -66,9 +66,10 @@ microphone has a signal, and preserves manual volume changes when restoring. It 
 
 The music sleep timer fades matching application sessions over its final thirty seconds, pauses the selected player,
 then restores volume. A manual volume adjustment takes ownership away from the fade. Players without a matching
-application audio session can still be paused; their volume cannot be faded. Soundboard files play on the computer;
-radio targets must be direct HTTP(S) audio streams (Media Foundation-compatible on Windows, or played via `ffplay`,
-`mpv` or `vlc` on Linux/macOS), not playlist webpages.
+application audio session can still be paused; their volume cannot be faded. Soundboard files and radio streams play
+on the computer: Windows plays them itself, Linux and macOS through `ffplay`, `mpv` or `vlc` (whichever is installed;
+the output device setting applies on Windows only). Radio targets are direct HTTP(S) audio streams, or HLS (`.m3u8`)
+manifests on Windows, not playlist webpages.
 
 ## Optional integrations
 

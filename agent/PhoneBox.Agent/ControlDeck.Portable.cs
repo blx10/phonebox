@@ -33,7 +33,12 @@ internal sealed class PortableDeckNative(
     public Task<bool> PlatformAction(string kind, string target, string? argument, int value, CancellationToken ct) => Task.FromResult(false);
     public Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct) => Task.FromResult<IReadOnlyList<DeckMedia>>(media.Snapshot() is { } m
         ? [new("current", m.App, m.Title, m.Playing, m.PosMs, m.DurMs, m.CanSeek, false, false, false, "None")] : []);
-    public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct) => id == "current" ? media.Control(action, value) : Task.FromResult(false);
+    public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct) =>
+        id != "current" ? Task.FromResult(false) : action == "pause" ? media.PauseAsync() : media.Control(action, value);
+    public Task<bool> PauseCurrentMedia(CancellationToken ct) => media.PauseAsync();
+
+    /// <summary>A player that ended by itself (stream dropped, file finished), so a radio shows as stopped at once.</summary>
+    public event Action<string>? SoundStopped;
 
     public string? ActionState(DeckAction action)
     {
@@ -61,7 +66,14 @@ internal sealed class PortableDeckNative(
             var process = new Process { StartInfo = start, EnableRaisingEvents = true };
             process.Exited += (_, _) => _ = Task.Run(() =>
             {
-                lock (_gate) if (_sounds.TryGetValue(id, out var current) && ReferenceEquals(current, process)) StopSoundLocked(id);
+                var ended = false;
+                lock (_gate)
+                    if (_sounds.TryGetValue(id, out var current) && ReferenceEquals(current, process))
+                    {
+                        StopSoundLocked(id);
+                        ended = true;
+                    }
+                if (ended) SoundStopped?.Invoke(id);
             });
             try
             {
@@ -137,7 +149,7 @@ internal sealed class PortableDeckNative(
         string[] args = kind switch
         {
             "ffplay" => ["-nodisp", "-autoexit", "-vn", "-sn", "-loglevel", "error", "-volume", clamped.ToString(CultureInfo.InvariantCulture), "-i", target],
-            "mpv" => ["--no-config", "--no-video", "--really-quiet", $"--volume={clamped.ToString(CultureInfo.InvariantCulture)}", "--", target],
+            "mpv" => ["--no-config", "--no-terminal", "--no-video", "--really-quiet", $"--volume={clamped.ToString(CultureInfo.InvariantCulture)}", "--", target],
             "afplay" => ["-v", normalizedVolume, target],
             _ => ["--intf", "dummy", "--no-one-instance", "--play-and-exit", "--no-video", "--quiet", $"--gain={normalizedVolume}", "--", target],
         };
