@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using PhoneBox.Agent;
 using Xunit;
@@ -354,6 +356,210 @@ public sealed class ControlDeckTests
         }
     }
 
+    [Fact]
+    public async Task SharedAumidMediaPlayPauseChecksSelectedTargetSessionBeforeStoppingRadio()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "phonebox-shared-aumid-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var cfgPath = Path.Combine(dir, "config.json");
+            File.WriteAllText(cfgPath, """
+                {
+                  "controls": {
+                    "actions": [
+                      { "id": "r-1", "label": "Radyo Fenomen", "kind": "radio", "target": "https://example.com/fenomen.mp3", "value": 80 }
+                    ]
+                  }
+                }
+                """);
+
+            var native = new FakeRadioDeckNative();
+            using var deck = new ControlDeck(new ConfigStore(cfgPath), native, NullLogger<ControlDeck>.Instance);
+
+            // Default IDeckNative path: selected session first (paused) + playing background session under same AUMID
+            Assert.True((await deck.Act("action", "r-1", "", null, null, null, default)).Ok);
+            native.MediaSessions =
+            [
+                new DeckMedia("chrome.exe", "Chrome", "Selected Tab (paused)", false, 0, 100_000, true, false, false, false, "None"),
+                new DeckMedia("chrome.exe", "Chrome", "Background Tab (playing)", true, 1_000, 100_000, true, false, false, false, "None"),
+            ];
+            native.CurrentSessionIndex = 0;
+            Assert.True((await deck.Act("media", "chrome.exe", "playpause", null, null, null, default)).Ok);
+            Assert.Empty(native.PlayingRadios);
+            Assert.True(native.MediaSessions[0].Playing);
+
+            // Direct selected-session path (modeling WindowsDeckNative): background session index 0 playing, CurrentSessionIndex 1 paused
+            Assert.True((await deck.Act("action", "r-1", "", null, null, null, default)).Ok);
+            native.UseDirectSessionMediaActionWithState = true;
+            native.MediaSessions =
+            [
+                new DeckMedia("chrome.exe", "Chrome", "Background Tab (playing)", true, 1_000, 100_000, true, false, false, false, "None"),
+                new DeckMedia("chrome.exe", "Chrome", "Selected Tab (paused)", false, 0, 100_000, true, false, false, false, "None"),
+            ];
+            native.CurrentSessionIndex = 1;
+            Assert.True((await deck.Act("media", "chrome.exe", "playpause", null, null, null, default)).Ok);
+            Assert.Empty(native.PlayingRadios);
+            Assert.True(native.MediaSessions[1].Playing);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CancellingRadioMediaPauseRollsBackStartedRadio()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "phonebox-radio-cancel-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var cfgPath = Path.Combine(dir, "config.json");
+            File.WriteAllText(cfgPath, """
+                {
+                  "controls": {
+                    "actions": [
+                      { "id": "r-1", "label": "Radyo Fenomen", "kind": "radio", "target": "https://example.com/fenomen.mp3", "value": 80 }
+                    ]
+                  }
+                }
+                """);
+
+            var native = new FakeRadioDeckNative();
+            var pauseStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            native.OnPauseCurrentMedia = async ct =>
+            {
+                pauseStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return false;
+            };
+
+            using var deck = new ControlDeck(new ConfigStore(cfgPath), native, NullLogger<ControlDeck>.Instance);
+            using var cts = new CancellationTokenSource();
+
+            var actTask = deck.Act("action", "r-1", "", null, null, null, cts.Token);
+            await pauseStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Contains("r-1", native.PlayingRadios);
+
+            cts.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => actTask);
+            Assert.Empty(native.PlayingRadios);
+            Assert.Null(deck.EffectiveMedia(null));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConcurrentRadioStartAndMediaPlayPauseSerializeWithoutBothPlaying()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "phonebox-radio-serialize-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var cfgPath = Path.Combine(dir, "config.json");
+            File.WriteAllText(cfgPath, """
+                {
+                  "controls": {
+                    "actions": [
+                      { "id": "r-1", "label": "Radyo Fenomen", "kind": "radio", "target": "https://example.com/fenomen.mp3", "value": 80 }
+                    ]
+                  }
+                }
+                """);
+
+            var native = new FakeRadioDeckNative
+            {
+                MediaSessions =
+                [
+                    new DeckMedia("Spotify.exe", "Spotify", "Song", true, 1_000, 100_000, true, false, false, false, "None"),
+                ],
+                CurrentSessionIndex = 0,
+            };
+            var pauseEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releasePause = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            native.OnPauseCurrentMedia = async _ =>
+            {
+                native.MediaSessions[0] = native.MediaSessions[0] with { Playing = false };
+                pauseEntered.TrySetResult();
+                await releasePause.Task;
+                return true;
+            };
+
+            using var deck = new ControlDeck(new ConfigStore(cfgPath), native, NullLogger<ControlDeck>.Instance);
+            var startRadioTask = deck.Act("action", "r-1", "", null, null, null, default);
+            await pauseEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            // Concurrently resume Spotify while radio transition holds _focusGate
+            var playPauseTask = deck.Act("media", "Spotify.exe", "playpause", null, null, null, default);
+            await Task.Delay(50);
+            Assert.False(playPauseTask.IsCompleted);
+
+            releasePause.SetResult();
+            Assert.True((await startRadioTask).Ok);
+            Assert.True((await playPauseTask).Ok);
+
+            Assert.True(native.MediaSessions[0].Playing);
+            Assert.Empty(native.PlayingRadios);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PlaylistActionStopsActiveRadioOnlyWhenSpotifySucceeds()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "phonebox-playlist-focus-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var cfgPath = Path.Combine(dir, "config.json");
+            File.WriteAllText(cfgPath, """
+                {
+                  "controls": {
+                    "spotifyToken": "test-access-token",
+                    "actions": [
+                      { "id": "r-1", "label": "Radyo Fenomen", "kind": "radio", "target": "https://example.com/fenomen.mp3", "value": 80 },
+                      { "id": "pl-1", "label": "Focus Mix", "kind": "playlist", "target": "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M" }
+                    ]
+                  }
+                }
+                """);
+
+            var store = new ConfigStore(cfgPath);
+            var native = new FakeRadioDeckNative();
+            var nextStatus = HttpStatusCode.Forbidden;
+            using var http = new HttpClient(new FakeHttpHandler(_ => new HttpResponseMessage(nextStatus)));
+            using var spotify = new SpotifyControl(store, new AgentEndpoint(), http);
+            using var deck = new ControlDeck(store, native, NullLogger<ControlDeck>.Instance, spotify: spotify);
+
+            Assert.True((await deck.Act("action", "r-1", "", null, null, null, default)).Ok);
+            Assert.Contains("r-1", native.PlayingRadios);
+
+            Assert.False((await deck.Act("action", "pl-1", "", null, null, null, default)).Ok);
+            Assert.Contains("r-1", native.PlayingRadios);
+
+            nextStatus = HttpStatusCode.NoContent;
+            Assert.True((await deck.Act("action", "pl-1", "", null, null, null, default)).Ok);
+            Assert.Empty(native.PlayingRadios);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private sealed class FakeHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(respond(request));
+    }
+
     private sealed class FakeRadioDeckNative : IDeckNative
     {
         private readonly Lock _gate = new();
@@ -363,6 +569,8 @@ public sealed class ControlDeckTests
         public int CurrentSessionIndex = -1;
         public readonly List<int> PausedSessionIndices = [];
         public int MediaQueryCount;
+        public bool UseDirectSessionMediaActionWithState;
+        public Func<CancellationToken, Task<bool>>? OnPauseCurrentMedia;
         public ManualResetEventSlim? BlockPlayGate;
         public readonly ManualResetEventSlim PlayEnteredGate = new(false);
 
@@ -394,11 +602,25 @@ public sealed class ControlDeckTests
             MediaQueryCount++;
             return Task.FromResult<IReadOnlyList<DeckMedia>>(MediaSessions);
         }
-        public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct)
-        {
-            var idx = CurrentSessionIndex >= 0 && CurrentSessionIndex < MediaSessions.Count && MediaSessions[CurrentSessionIndex].Id == id
+        private int ResolveSessionIndex(string id) =>
+            CurrentSessionIndex >= 0 && CurrentSessionIndex < MediaSessions.Count && MediaSessions[CurrentSessionIndex].Id == id
                 ? CurrentSessionIndex
                 : MediaSessions.FindIndex(m => m.Id == id);
+        public async Task<(bool Ok, bool WasPlaying)> MediaActionWithState(string id, string action, long value, CancellationToken ct)
+        {
+            if (!UseDirectSessionMediaActionWithState)
+            {
+                var wasPlaying = action == "playpause" && (await Media(ct)).FirstOrDefault(p => p.Id == id)?.Playing == true;
+                return (await MediaAction(id, action, value, ct), wasPlaying);
+            }
+            var idx = ResolveSessionIndex(id);
+            if (idx < 0) return (false, false);
+            var selectedWasPlaying = action == "playpause" && MediaSessions[idx].Playing;
+            return (await MediaAction(id, action, value, ct), selectedWasPlaying);
+        }
+        public Task<bool> MediaAction(string id, string action, long value, CancellationToken ct)
+        {
+            var idx = ResolveSessionIndex(id);
             if (idx < 0) return Task.FromResult(false);
             switch (action)
             {
@@ -417,6 +639,7 @@ public sealed class ControlDeckTests
         }
         public Task<bool> PauseCurrentMedia(CancellationToken ct)
         {
+            if (OnPauseCurrentMedia is not null) return OnPauseCurrentMedia(ct);
             if (CurrentSessionIndex < 0 || CurrentSessionIndex >= MediaSessions.Count) return Task.FromResult(false);
             if (!MediaSessions[CurrentSessionIndex].Playing) return Task.FromResult(false);
             PausedSessionIndices.Add(CurrentSessionIndex);

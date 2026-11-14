@@ -86,8 +86,14 @@ app.MapGet("/api/controls/task-output/{id}", (string id, ControlDeck deck) => Re
 app.MapGet("/api/controls/spotify/state", async (SpotifyControl spotify, CancellationToken ct) => Results.Json(await spotify.Snapshot(ct)));
 app.MapPost("/api/controls/spotify/action/{action}", async (string action, string? id, SpotifyControl spotify, ControlDeck deck, CancellationToken ct) =>
 {
-    var res = await spotify.Act(action, id, ct);
-    if (res.Ok && action is "play-queued" or "playlist") deck.StopAllRadios();
+    var res = action is "play-queued" or "playlist"
+        ? await deck.RunWithMediaFocusAsync(async token =>
+        {
+            var result = await spotify.Act(action, id, token);
+            if (result.Ok) deck.StopAllRadios();
+            return result;
+        }, ct)
+        : await spotify.Act(action, id, ct);
     return Results.Json(res);
 });
 app.MapGet("/api/controls/spotify/connect", (SpotifyControl spotify) =>
@@ -494,13 +500,17 @@ app.MapGet("/api/art", (MediaMonitor media) =>
 
 app.MapPost("/api/media/{action}", async (string action, long? ms, MediaMonitor media, ControlDeck deck, CancellationToken ct) =>
 {
-    var sysSnapshot = media.Snapshot();
-    if (await deck.TryControlRadioMediaAsync(action, sysSnapshot, ct) is { } radioHandled)
-        return radioHandled ? Results.Json(new { ok = true, media = deck.EffectiveMedia(media.Snapshot()) }) : Results.BadRequest();
-    var starting = action is "next" or "prev" || (action == "playpause" && sysSnapshot?.Playing != true);
-    var ok = await media.Control(action, ms);
-    if (ok && starting) deck.StopAllRadios();
-    return ok ? Results.Json(new { ok = true, media = deck.EffectiveMedia(media.Snapshot()) }) : Results.BadRequest();
+    var outcome = await deck.RunWithMediaFocusAsync(async token =>
+    {
+        var sysSnapshot = media.Snapshot();
+        if (await deck.TryControlRadioMediaCoreAsync(action, sysSnapshot, token) is { } radioHandled)
+            return (Ok: radioHandled, Media: deck.EffectiveMedia(media.Snapshot()));
+        var starting = action is "next" or "prev" || (action == "playpause" && sysSnapshot?.Playing != true);
+        var ok = await media.Control(action, ms);
+        if (ok && starting) deck.StopAllRadios();
+        return (Ok: ok, Media: deck.EffectiveMedia(media.Snapshot()));
+    }, ct);
+    return outcome.Ok ? Results.Json(new { ok = true, media = outcome.Media }) : Results.BadRequest();
 });
 
 app.MapPost("/api/volume", (int? level, string? op, AudioControl audio) =>

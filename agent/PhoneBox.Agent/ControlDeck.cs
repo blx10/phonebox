@@ -27,6 +27,7 @@ public sealed partial class ControlDeck : BackgroundService
     private readonly Dictionary<string, long> _sleep = [];
     private readonly Lock _radioGate = new();
     private readonly Lock _radioState = new();
+    private readonly SemaphoreSlim _focusGate = new(1, 1);
     private readonly HashSet<string> _activeRadios = [];
     private string? _lastRadioId;
     private long _radioStartedAt, _radioElapsedMs;
@@ -38,7 +39,7 @@ public sealed partial class ControlDeck : BackgroundService
     private readonly PushStore? _push;
     private readonly AudioControl? _master;
     public ControlDeck(ConfigStore config, AudioControl audio, MediaMonitor media, ILogger<ControlDeck> log, SpotifyControl spotify, PushStore push)
-        : this(config, CreateNative(audio, media), log, null, push, audio) { _spotify = spotify; }
+        : this(config, CreateNative(audio, media), log, null, push, audio, spotify) { }
 
     private static IDeckNative CreateNative(AudioControl audio, MediaMonitor media)
     {
@@ -48,9 +49,9 @@ public sealed partial class ControlDeck : BackgroundService
         return new PortableDeckNative(audio, media);
 #endif
     }
-    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, PushStore? push = null, AudioControl? master = null)
+    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, PushStore? push = null, AudioControl? master = null, SpotifyControl? spotify = null)
     {
-        _config = config; _log = log; _push = push; _master = master;
+        _config = config; _log = log; _push = push; _master = master; _spotify = spotify;
         _now = now ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         _tasks = new(config, log);
         _native = native;
@@ -139,10 +140,17 @@ public sealed partial class ControlDeck : BackgroundService
                     if (op is not ("" or "all" or "media" or "communications" or "console")) return new(false, "Unknown audio role");
                     ok = _native.DefaultDevice(id, op switch { "media" => 1, "communications" => 2, "console" => 0, _ => null }); break;
                 case "media":
-                    var wasPlayingMedia = op == "playpause" && (await SafeMedia(ct)).Any(p => p.Id == id && p.Playing);
-                    ok = await _native.MediaAction(id, op, value ?? 0, ct);
-                    if (ok && (op is "next" or "prev" || (op == "playpause" && !wasPlayingMedia)))
-                        StopAllRadios(clearLast: true);
+                    if (op is "next" or "prev" or "playpause")
+                    {
+                        ok = await RunWithMediaFocusAsync(async token =>
+                        {
+                            var (mediaOk, wasPlayingMedia) = await _native.MediaActionWithState(id, op, value ?? 0, token);
+                            if (mediaOk && (op is "next" or "prev" || (op == "playpause" && !wasPlayingMedia)))
+                                StopAllRadios(clearLast: true);
+                            return mediaOk;
+                        }, ct);
+                    }
+                    else ok = await _native.MediaAction(id, op, value ?? 0, ct);
                     break;
                 case "ptt":
                     if (op == "begin") { var token = _ptt.Begin(id); return new(token is not null, token is null ? "Microphone is unavailable" : null, token); }
@@ -246,21 +254,30 @@ public sealed partial class ControlDeck : BackgroundService
                 else _native.Play(action.Id, action.Target, action.Device, Math.Clamp(action.Value, 0, 100));
                 return new(true);
             case "radio":
-                if (op == "stop")
+                return await RunWithMediaFocusAsync(async token =>
                 {
-                    StopRadio(action.Id, clearLast: true);
-                    return new(true);
-                }
-                if (!StartRadio(action)) return new(false, "Radio stream is unavailable");
-                await PauseActiveSystemMediaAsync(ct);
-                return new(true);
+                    if (op == "stop")
+                    {
+                        StopRadio(action.Id, clearLast: true);
+                        return new DeckResult(true);
+                    }
+                    var started = await StartRadioAndPauseMediaCoreAsync(action, token);
+                    return new DeckResult(started, started ? null : "Radio stream is unavailable");
+                }, ct);
             case "midi":
                 if (!int.TryParse(action.Device, out var port)) return new(false, "Choose a MIDI output port");
                 _native.Midi(port, action.Target, value ?? action.Value); return new(true);
             case "osc":
                 await SendOsc(action.Device ?? "", action.Target, value ?? action.Value, ct); return new(true);
             case "workflow": return await Workflow(action, ct);
-            case "playlist": return _spotify is null ? new(false, "Spotify is unavailable") : await _spotify.Act("playlist", action.Id, ct);
+            case "playlist":
+                if (_spotify is null) return new(false, "Spotify is unavailable");
+                return await RunWithMediaFocusAsync(async token =>
+                {
+                    var res = await _spotify.Act("playlist", action.Id, token);
+                    if (res.Ok) StopAllRadios(clearLast: true);
+                    return res;
+                }, ct);
             case "audio-route": return await RouteAudio(action, ct);
             case "mixer": case "mixer-mute": return MixerAction(action, value);
             default:
@@ -596,7 +613,33 @@ public sealed partial class ControlDeck : BackgroundService
         return systemMedia;
     }
 
-    public async Task<bool?> TryControlRadioMediaAsync(string action, MediaSnapshot? systemMedia, CancellationToken ct)
+    internal async Task<T> RunWithMediaFocusAsync<T>(Func<CancellationToken, Task<T>> work, CancellationToken ct)
+    {
+        await _focusGate.WaitAsync(ct);
+        try { return await work(ct); }
+        finally { _focusGate.Release(); }
+    }
+
+    private async Task<bool> StartRadioAndPauseMediaCoreAsync(DeckAction action, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!StartRadio(action)) return false;
+        try
+        {
+            await PauseActiveSystemMediaAsync(ct);
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            StopRadio(action.Id, clearLast: true);
+            throw;
+        }
+    }
+
+    public Task<bool?> TryControlRadioMediaAsync(string action, MediaSnapshot? systemMedia, CancellationToken ct) =>
+        RunWithMediaFocusAsync(token => TryControlRadioMediaCoreAsync(action, systemMedia, token), ct);
+
+    internal async Task<bool?> TryControlRadioMediaCoreAsync(string action, MediaSnapshot? systemMedia, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var radios = _config.Get().Controls.Actions.Where(a => a.Kind == "radio").ToArray();
@@ -612,20 +655,19 @@ public sealed partial class ControlDeck : BackgroundService
                 for (var step = 1; step <= radios.Length; step++)
                 {
                     ct.ThrowIfCancellationRequested();
-                    if (StartRadio(radios[(idx + step) % radios.Length])) { await PauseActiveSystemMediaAsync(ct); return true; }
+                    if (await StartRadioAndPauseMediaCoreAsync(radios[(idx + step) % radios.Length], ct)) return true;
                 }
                 return false;
             case "prev":
                 for (var step = 1; step <= radios.Length; step++)
                 {
                     ct.ThrowIfCancellationRequested();
-                    if (StartRadio(radios[(idx - step + radios.Length * step) % radios.Length])) { await PauseActiveSystemMediaAsync(ct); return true; }
+                    if (await StartRadioAndPauseMediaCoreAsync(radios[(idx - step + radios.Length * step) % radios.Length], ct)) return true;
                 }
                 return false;
             case "playpause":
                 if (playing is not null) { StopRadio(playing.Id, clearLast: false); return true; }
-                if (StartRadio(current)) { await PauseActiveSystemMediaAsync(ct); return true; }
-                return false;
+                return await StartRadioAndPauseMediaCoreAsync(current, ct);
             default:
                 return false;
         }
@@ -636,12 +678,5 @@ public sealed partial class ControlDeck : BackgroundService
         try { await _native.PauseCurrentMedia(ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { }
-    }
-
-    private async Task<IReadOnlyList<DeckMedia>> SafeMedia(CancellationToken ct)
-    {
-        try { return await _native.Media(ct); }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch { return []; }
     }
 }
