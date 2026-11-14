@@ -79,6 +79,52 @@ public sealed class ControlDeckTests
     }
 
     [Fact]
+    public async Task NextAndPreviousSkipDisabledStationsAndADisabledStationIsNotKeptAsPaused()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "phonebox-radio-disabled-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var cfgPath = Path.Combine(dir, "config.json");
+            File.WriteAllText(cfgPath, """
+                {
+                  "controls": {
+                    "actions": [
+                      { "id": "r-a", "label": "A", "kind": "radio", "target": "https://example.com/a.mp3", "value": 80 },
+                      { "id": "r-b", "label": "B", "kind": "radio", "target": "https://example.com/b.mp3", "value": 80, "enabled": false },
+                      { "id": "r-c", "label": "C", "kind": "radio", "target": "https://example.com/c.mp3", "value": 80 }
+                    ]
+                  }
+                }
+                """);
+            var native = new FakeRadioDeckNative();
+            var store = new ConfigStore(cfgPath);
+            using var deck = new ControlDeck(store, native, NullLogger<ControlDeck>.Instance);
+            var idleSys = new MediaSnapshot("Spotify", "Track 1", "Artist 1", "Album 1", false, 0, 180_000, 1, true);
+
+            Assert.True((await deck.Act("action", "r-a", "", null, null, null, default)).Ok);
+            Assert.Equal(true, await deck.TryControlRadioMediaAsync("next", idleSys, default));
+            Assert.Equal(["r-c"], native.PlayingRadios.ToArray());   // B is disabled
+            Assert.Equal(true, await deck.TryControlRadioMediaAsync("prev", idleSys, default));
+            Assert.Equal(["r-a"], native.PlayingRadios.ToArray());
+
+            // disabling the playing station stops it and leaves nothing to resume
+            var json = File.ReadAllText(cfgPath).Replace("\"id\": \"r-a\", \"label\": \"A\", \"kind\": \"radio\", \"target\": \"https://example.com/a.mp3\", \"value\": 80 }",
+                "\"id\": \"r-a\", \"label\": \"A\", \"kind\": \"radio\", \"target\": \"https://example.com/a.mp3\", \"value\": 80, \"enabled\": false }");
+            Assert.Null(store.Save(json));
+            deck.StopDisabledControls();
+            deck.ReconcileRadios(waitForGate: true);
+            Assert.Empty(native.PlayingRadios);
+            Assert.Equal(idleSys, deck.EffectiveMedia(idleSys));
+            Assert.Null(await deck.TryControlRadioMediaAsync("playpause", idleSys, default));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task NowPlayingShowsActiveRadioAndNextPrevPlayPauseControlsCycleThroughStations()
     {
         var dir = Path.Combine(Path.GetTempPath(), "phonebox-radio-nowplaying-" + Guid.NewGuid().ToString("N"));

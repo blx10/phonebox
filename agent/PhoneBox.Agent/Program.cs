@@ -251,6 +251,7 @@ app.MapPut("/api/settings", async (HttpRequest req, ConfigStore cfg, ControlDeck
     var err = cfg.Save(await r.ReadToEndAsync(), expected);
     if (err == ConfigStore.Conflict) return Results.Json(new { error = err }, statusCode: StatusCodes.Status409Conflict);
     if (err is not null) return Results.BadRequest(new { error = err });
+    deck.StopDisabledControls();
     deck.ReconcileRadios(waitForGate: true);
     log.LogInformation("settings saved");
     return Results.Ok(new { version = cfg.Version });
