@@ -65,6 +65,7 @@ public sealed class RadioCardViewsTests
                 Target = "https://example.com/stream.mp3",
                 Icon = "https://cdn.example.com/redirect-downgrade.png",
             };
+            var httpHops = 0; // an Assert inside the handler would be swallowed by the download's catch
             using var downgradeHttp = new HttpClient(new FakeHandler(req =>
             {
                 if (req.RequestUri!.AbsoluteUri == "https://cdn.example.com/redirect-downgrade.png")
@@ -73,13 +74,14 @@ public sealed class RadioCardViewsTests
                     redirect.Headers.Location = new Uri("http://cdn.example.com/insecure.png");
                     return redirect;
                 }
-                Assert.Fail("Unexpected redirect hop to HTTP");
+                httpHops++;
                 return new HttpResponseMessage(HttpStatusCode.NotFound);
             }));
             using var downgradeCache = new RadioLogoCache(cacheDir + "-dg", downgradeHttp);
             var downgradeLogo = await downgradeCache.GetAsync(downgradeAction, allowOnlineLookup: false);
             Assert.Equal("image/svg+xml", downgradeLogo.Mime);
             Assert.True(downgradeLogo.IsFallback);
+            Assert.Equal(0, httpHops);
 
             // Unicode monogram fallback without replacement characters
             var unknown = new DeckAction { Id = "r2", Label = "📻 Jazz", Kind = "radio", Target = "https://example.com/live.mp3" };
