@@ -7,7 +7,8 @@ namespace PhoneBox.Agent;
 /// <summary>Global settings for the Speech to text widget, speech providers, and transcript disk logging.</summary>
 public sealed class SpeechConfig
 {
-    public static readonly string[] ValidProviders = ["auto", "apple", "openai", "groq", "gemini"];
+    public static readonly string[] ValidProviders = ["auto", "apple", "openai", "groq", "gemini", "local-http", "whisper-cli"];
+    public static readonly string[] ValidLocalProtocols = ["openai-audio", "openai-chat", "ollama"];
     public static readonly string[] ValidTranscriptFormats = ["daily-md", "daily-txt", "single-md", "per-item-txt", "jsonl"];
 
     public bool Enabled { get; set; }
@@ -22,6 +23,14 @@ public sealed class SpeechConfig
     public string GroqModel { get; set; } = "whisper-large-v3-turbo";
     public string GeminiApiKey { get; set; } = "";
     public string GeminiModel { get; set; } = "gemini-2.5-flash";
+
+    public bool AllowLocalServer { get; set; }
+    public string LocalProtocol { get; set; } = "openai-audio";
+    public string LocalBaseUrl { get; set; } = "";
+    public string LocalModel { get; set; } = "whisper-1";
+    public string LocalApiKey { get; set; } = "";
+    public string WhisperCliPath { get; set; } = "";
+    public string WhisperModelPath { get; set; } = "";
 
     public bool SaveTranscripts { get; set; }
     public string TranscriptDir { get; set; } = "";
@@ -42,6 +51,13 @@ public sealed class SpeechConfig
         GeminiApiKey = TrimMax(GeminiApiKey, 512);
         GeminiModel = DefaultIfEmpty(TrimMax(GeminiModel, 128), "gemini-2.5-flash");
 
+        LocalProtocol = NormalizeEnum(LocalProtocol, ValidLocalProtocols, "openai-audio");
+        LocalBaseUrl = TrimMax(LocalBaseUrl, 512);
+        LocalModel = DefaultIfEmpty(TrimMax(LocalModel, 128), "whisper-1");
+        LocalApiKey = TrimMax(LocalApiKey, 512);
+        WhisperCliPath = CleanPathField(WhisperCliPath, 512);
+        WhisperModelPath = CleanPathField(WhisperModelPath, 512);
+
         TranscriptDir = CleanPathField(TranscriptDir, 512);
         TranscriptFormat = NormalizeEnum(TranscriptFormat, ValidTranscriptFormats, "daily-md");
         HistoryLimit = Math.Clamp(HistoryLimit == 0 ? 15 : HistoryLimit, 1, 50);
@@ -52,6 +68,7 @@ public sealed class SpeechConfig
         yield return OpenAiApiKey;
         yield return GroqApiKey;
         yield return GeminiApiKey;
+        yield return LocalApiKey;
     }
 
     internal static string NormalizeEnum(string? value, string[] allowed, string fallback)
@@ -90,7 +107,7 @@ public sealed record SpeechWidgetSettings(
     bool Control,
     string TranscriptDir = "")
 {
-    public static readonly string[] ValidWidgetProviders = ["default", "auto", "apple", "openai", "groq", "gemini"];
+    public static readonly string[] ValidWidgetProviders = ["default", "auto", "apple", "openai", "groq", "gemini", "local-http", "whisper-cli"];
     public static readonly string[] ValidModes = ["toggle", "hold"];
     public static readonly string[] ValidNoteModes = ["append", "prepend", "bullet", "timestamp", "replace"];
     public static readonly string[] ValidSavePolicies = ["default", "always", "never"];

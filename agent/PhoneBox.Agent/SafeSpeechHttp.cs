@@ -61,6 +61,59 @@ internal static class SafeSpeechHttp
         return false;
     }
 
+    /// <summary>Validates a Local HTTP URL: loopback (127.0.0.1 / ::1 / localhost) excluding PhoneBox's own ports, or HTTPS public hosts.</summary>
+    public static bool TryValidateLocalEndpoint(
+        string? rawUrl,
+        IReadOnlyCollection<int> blockedPorts,
+        out Uri? uri,
+        out bool isLoopback,
+        out string? error)
+    {
+        uri = null;
+        isLoopback = false;
+        error = null;
+
+        if (!Uri.TryCreate((rawUrl ?? "").Trim(), UriKind.Absolute, out var parsed)
+            || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
+        {
+            error = "Local server URL must be an http:// or https:// URL.";
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(parsed.UserInfo))
+        {
+            error = "Embedded credentials in URLs are not allowed.";
+            return false;
+        }
+
+        if (IsExplicitLoopbackHost(parsed.Host))
+        {
+            if (blockedPorts.Contains(parsed.Port))
+            {
+                error = $"Local server port {parsed.Port} is reserved by PhoneBox.";
+                return false;
+            }
+            isLoopback = true;
+            uri = parsed;
+            return true;
+        }
+
+        if (parsed.Scheme != Uri.UriSchemeHttps)
+        {
+            error = "Non-loopback endpoints must use HTTPS (plain HTTP is allowed only for 127.0.0.1 / ::1 / localhost).";
+            return false;
+        }
+
+        if (IPAddress.TryParse(parsed.Host, out var hostIp) && !IsPublicAddress(hostIp))
+        {
+            error = "Private or link-local IP addresses are not allowed; use 127.0.0.1 / ::1 / localhost or a public HTTPS host.";
+            return false;
+        }
+
+        uri = parsed;
+        return true;
+    }
+
     internal static SocketsHttpHandler CreateHandler(bool allowLoopback, IReadOnlyCollection<int> blockedPorts) =>
         new()
         {

@@ -14,7 +14,8 @@ public sealed record SpeechSetupStatusDto(
     bool MicCaptureAvailable,
     string DefaultTranscriptDir,
     bool SaveTranscripts,
-    string TranscriptDir);
+    string TranscriptDir,
+    string? WhisperCliPath = null);
 
 public sealed record SpeechDirectoryEntry(string Name, string Path);
 
@@ -725,7 +726,8 @@ internal sealed partial class SpeechService : IDisposable
             _capture.HasPlatformCapture,
             GetDefaultTranscriptDirectory(),
             cfg.SaveTranscripts,
-            ResolveTranscriptDirectory(cfg));
+            ResolveTranscriptDirectory(cfg),
+            DetectWhisperCli(cfg));
     }
 
     private bool IsOpActive(long opId)
@@ -996,12 +998,26 @@ internal sealed partial class SpeechService : IDisposable
                     return (null, "Gemini API key is not configured.");
                 return ("gemini", null);
 
+            case "local-http":
+                if (!cfg.AllowLocalServer)
+                    return (null, "Local HTTP server is disabled in Settings.");
+                if (string.IsNullOrWhiteSpace(cfg.LocalBaseUrl))
+                    return (null, "Local HTTP server URL is not configured.");
+                return ("local-http", null);
+
+            case "whisper-cli":
+                if (ResolveWhisperCliPath(cfg) is null)
+                    return (null, "Whisper CLI binary was not found on this computer.");
+                return ("whisper-cli", null);
+
             case "auto":
                 if (IsAppleAutoAvailable()) return ("apple", null);
                 if (!string.IsNullOrWhiteSpace(cfg.OpenAiApiKey)) return ("openai", null);
                 if (!string.IsNullOrWhiteSpace(cfg.GroqApiKey)) return ("groq", null);
                 if (!string.IsNullOrWhiteSpace(cfg.GeminiApiKey)) return ("gemini", null);
-                return (null, "No speech provider configured (enable Apple Speech on macOS or add a cloud STT API key in Settings).");
+                if (ResolveWhisperCliPath(cfg) is not null) return ("whisper-cli", null);
+                if (cfg.AllowLocalServer && !string.IsNullOrWhiteSpace(cfg.LocalBaseUrl)) return ("local-http", null);
+                return (null, "No speech provider configured (enable Apple Speech, configure a cloud STT key, install Whisper CLI, or opt in to a local STT server).");
 
             default:
                 return (null, $"Unsupported provider '{requested}'.");
@@ -1026,6 +1042,8 @@ internal sealed partial class SpeechService : IDisposable
                 "openai" => await TestOpenAiAsync(cfg, ct),
                 "groq" => await TestGroqAsync(cfg, ct),
                 "gemini" => await TestGeminiAsync(cfg, ct),
+                "local-http" => await TestLocalHttpAsync(cfg, ct),
+                "whisper-cli" => TestWhisperCli(cfg),
                 _ => new SpeechTestResult(false, provider, $"Unsupported provider '{provider}'."),
             };
         }
@@ -1048,6 +1066,8 @@ internal sealed partial class SpeechService : IDisposable
             "openai" => TranscribeOpenAiAsync(wavPath, language, cfg, ct),
             "groq" => TranscribeGroqAsync(wavPath, language, cfg, ct),
             "gemini" => TranscribeGeminiAsync(wavPath, language, cfg, ct),
+            "local-http" => TranscribeLocalHttpAsync(wavPath, language, cfg, ct),
+            "whisper-cli" => TranscribeWhisperCliAsync(wavPath, language, cfg, ct),
             _ => throw new InvalidOperationException($"Unsupported speech provider '{provider}'."),
         };
     }

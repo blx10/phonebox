@@ -433,17 +433,19 @@ dd { margin: 0; word-break: break-all; }
 
       <div class="card" id="speechSettingsCard">
         <h3>Speech to text</h3>
-        <p class="hint" id="speechSetupBanner" style="margin:0 0 12px">Dictate from the panel using macOS Apple Speech Recognition or cloud STT APIs (OpenAI, Groq, Gemini).</p>
+        <p class="hint" id="speechSetupBanner" style="margin:0 0 12px">Dictate from the panel using macOS Apple Speech Recognition, cloud STT APIs (OpenAI, Groq, Gemini), or local Whisper CLIs / opt-in loopback servers.</p>
         <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" data-bind="speech.enabled"><span></span></label> Enable Speech to text</div>
         <p class="hint" style="margin:0 0 12px">Dictated transcripts and Note updates appear on an always-on desk screen; keep disabled or restrict widget control when unattended and avoid dictating secrets.</p>
         <div class="grid2">
           <div class="field"><label>Default provider</label>
             <select data-bind="speech.provider" id="speechProvider">
-              <option value="auto">Auto (Apple Speech › OpenAI › Groq › Gemini)</option>
+              <option value="auto">Auto (Apple Speech › Cloud › Local)</option>
               <option value="apple">Apple Speech Recognition (macOS)</option>
               <option value="openai">OpenAI Audio (Whisper / GPT-4o Transcribe)</option>
               <option value="groq">Groq Whisper (whisper-large-v3-turbo)</option>
               <option value="gemini">Google Gemini (Audio generateContent)</option>
+              <option value="local-http">Local LLM / Whisper HTTP server (opt-in)</option>
+              <option value="whisper-cli">Local Whisper CLI (mlx_whisper / whisper-cpp / whisper)</option>
             </select></div>
           <div class="field"><label>Default language (blank = auto, e.g. en-US, tr-TR)</label>
             <input type="text" data-bind="speech.language" placeholder="en-US" spellcheck="false"></div>
@@ -455,7 +457,7 @@ dd { margin: 0; word-break: break-all; }
         </div>
 
         <details style="margin:8px 0 12px">
-          <summary style="cursor:pointer;font-weight:600;color:var(--muted)">Cloud STT provider credentials (optional — API keys stay on this PC)</summary>
+          <summary style="cursor:pointer;font-weight:600;color:var(--muted)">Cloud &amp; local STT providers (optional — credentials stay on this PC)</summary>
           <p class="hint" style="margin:8px 0">API keys are stored only on this PC in <code>config.json</code> (plain JSON under <code>%APPDATA%\PhoneBox</code> on Windows, or <code>0600</code> on macOS/Linux) and are never sent to the phone.</p>
           <div class="grid2">
             <div class="field"><label>OpenAI API key</label><input type="password" data-bind="speech.openAiApiKey" autocomplete="off"></div>
@@ -468,6 +470,24 @@ dd { margin: 0; word-break: break-all; }
           <div class="grid2">
             <div class="field"><label>Gemini API key</label><input type="password" data-bind="speech.geminiApiKey" autocomplete="off"></div>
             <div class="field"><label>Gemini model</label><input type="text" data-bind="speech.geminiModel" placeholder="gemini-2.5-flash" spellcheck="false"></div>
+          </div>
+          <div class="row" style="margin:6px 0 10px"><label class="switch"><input type="checkbox" data-bind="speech.allowLocalServer"><span></span></label> Allow connections to local STT server (loopback 127.0.0.1 / ::1 / localhost, or public HTTPS)</div>
+          <div class="grid2">
+            <div class="field"><label>Local HTTP protocol</label>
+              <select data-bind="speech.localProtocol">
+                <option value="openai-audio">OpenAI Audio (/audio/transcriptions)</option>
+                <option value="openai-chat">OpenAI Chat multimodal (/chat/completions)</option>
+                <option value="ollama">Ollama (/api/chat — audio unsupported; use OpenAI Audio/Chat)</option>
+              </select></div>
+            <div class="field"><label>Local server URL (loopback or HTTPS)</label><input type="text" data-bind="speech.localBaseUrl" placeholder="http://127.0.0.1:8080/v1" spellcheck="false"></div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label>Local model</label><input type="text" data-bind="speech.localModel" placeholder="whisper-1" spellcheck="false"></div>
+            <div class="field"><label>Local server API key (optional)</label><input type="password" data-bind="speech.localApiKey" autocomplete="off"></div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label>Whisper CLI path (blank = auto-detect)</label><input type="text" data-bind="speech.whisperCliPath" placeholder="/opt/homebrew/bin/mlx_whisper" spellcheck="false"></div>
+            <div class="field"><label>Whisper model path or repo</label><input type="text" data-bind="speech.whisperModelPath" placeholder="mlx-community/whisper-large-v3-turbo" spellcheck="false"></div>
           </div>
         </details>
 
@@ -1715,6 +1735,8 @@ function ensureSpeechDefaults() {
     openAiApiKey: '', openAiModel: 'gpt-4o-mini-transcribe',
     groqApiKey: '', groqModel: 'whisper-large-v3-turbo',
     geminiApiKey: '', geminiModel: 'gemini-2.5-flash',
+    allowLocalServer: false, localProtocol: 'openai-audio', localBaseUrl: '', localModel: 'whisper-1', localApiKey: '',
+    whisperCliPath: '', whisperModelPath: '',
     saveTranscripts: false, transcriptDir: '', transcriptFormat: 'daily-md', saveAudioCopy: false, historyLimit: 15,
   };
   for (const [k, v] of Object.entries(defaults)) cfg.speech[k] ??= v;
@@ -1763,6 +1785,7 @@ async function loadSpeechSetupStatus() {
       parts.push(`Platform: ${s.platform}`);
     }
     parts.push(`Mic capture: ${s.micCaptureAvailable ? 'available' : 'missing'}`);
+    if (s.whisperCliPath) parts.push('Whisper CLI: found');
     if (s.ffmpegFound) parts.push('ffmpeg: found');
     el.textContent = parts.join(' · ');
   } catch (_) {}

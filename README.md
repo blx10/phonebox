@@ -238,7 +238,7 @@ failures retain the last measurements with an error. HTTPS-only endpoints withou
 Tap an AI session to see its model, timing and token details. Token counters describe the local session rather than
 the account allowance. Prompt/response text and tool arguments are not included in this panel data.
 
-**Speech to text** is off by default (`Enable Speech to text` in **Settings › General**, plus `Allow recording from the phone` per widget). It uses macOS Apple Speech Recognition or optional cloud APIs (OpenAI Audio, Groq Whisper, or Google Gemini — API keys are stored only on the PC in `config.json` with `0600` permissions on Unix). Dictated transcripts and **Note** updates are shown on an always-on desk screen, so avoid dictating secrets when the device is unattended.
+**Speech to text** is off by default (`Enable Speech to text` in **Settings › General**, plus `Allow recording from the phone` per widget). It uses macOS Apple Speech Recognition, optional local tools (`mlx_whisper` / `whisper-cpp` / `whisper` CLI or an opt-in loopback/HTTPS server with `Allow connections to local STT server`), or optional cloud APIs (OpenAI Audio, Groq Whisper, or Google Gemini — API keys are stored only on the PC in `config.json` with `0600` permissions on Unix). Dictated transcripts and **Note** updates are shown on an always-on desk screen, so avoid dictating secrets when the device is unattended.
 
 ## Layout editor & settings
 
