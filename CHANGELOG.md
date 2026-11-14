@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.9.5 — 2026-11-14
+
+AMD and Intel graphics cards with no vendor tool, a GPU details widget, internet radio in Now Playing with station
+cards, 12-hour times, font size, and 18 community pull requests (thanks to blx10).
 
 **Panel**
 - 12-hour times: Settings › Display › Time format shows 2:05 PM instead of 14:05 on the clock, world clocks, night
