@@ -983,6 +983,127 @@ public sealed class SpeechTests : IDisposable
         Assert.Contains("***", sanitized);
     }
 
+    [Fact]
+    public async Task GroqAndGeminiProviders_SendAllowListedHeadersAndMaskSecrets()
+    {
+        var groqKey = "gsk_super_secret_groq_key";
+        var geminiKey = "AIzaSy_super_secret_gemini_key";
+        var store = CreateStore(new AgentConfig
+        {
+            Speech = new SpeechConfig
+            {
+                Enabled = true,
+                Provider = "auto",
+                GroqApiKey = groqKey,
+                GroqModel = "whisper-large-v3-turbo",
+                GeminiApiKey = geminiKey,
+                GeminiModel = "gemini-2.5-flash",
+            },
+        });
+
+        Assert.DoesNotContain(groqKey, JsonSerializer.Serialize(store.Get().ToPublic(), ConfigStore.WriteOpts));
+        Assert.DoesNotContain(geminiKey, JsonSerializer.Serialize(store.Get().ToPublic(), ConfigStore.WriteOpts));
+
+        var wavPath = Path.Combine(_dir, "cloud-sample.wav");
+        await File.WriteAllBytesAsync(wavPath, BuildTestWav(800));
+
+        var appleMock = new FakeAppleClient { IsSupported = false };
+        Uri? lastUri = null;
+        string? lastAuth = null;
+        string? lastGeminiHeader = null;
+        string? lastBody = null;
+
+        var svc = new SpeechService(
+            store,
+            CreatePushStore(),
+            new AgentEndpoint(),
+            appleMock,
+            new FakeCapture(),
+            tempRoot: _dir,
+            rateLimiter: new SpeechRateLimiter(100, TimeSpan.FromSeconds(1)),
+            httpFactory: (_, _, _) => new HttpClient(new StubHttpHandler(req =>
+            {
+                lastUri = req.RequestUri;
+                lastAuth = req.Headers.Authorization?.ToString();
+                lastGeminiHeader = req.Headers.TryGetValues("x-goog-api-key", out var vals) ? string.Join(",", vals) : null;
+                lastBody = req.Content?.ReadAsStringAsync().GetAwaiter().GetResult();
+
+                if (lastUri?.Host == "generativelanguage.googleapis.com")
+                {
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Gemini transcript\"}]}}]}", Encoding.UTF8, "application/json"),
+                    };
+                }
+
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"text\":\"Groq transcript\"}", Encoding.UTF8, "application/json"),
+                };
+            })));
+
+        var (resolvedAuto, autoErr) = svc.ResolveProvider(store.Get().Speech!, SpeechWidgetSettings.Parse(null));
+        Assert.Null(autoErr);
+        Assert.Equal("groq", resolvedAuto);
+
+        var groqText = await svc.TranscribeWithProviderAsync("groq", wavPath, "tr-TR", store.Get().Speech!, CancellationToken.None);
+        Assert.Equal("Groq transcript", groqText);
+        Assert.Equal("https://api.groq.com/openai/v1/audio/transcriptions", lastUri?.ToString());
+        Assert.Equal($"Bearer {groqKey}", lastAuth);
+        Assert.Null(lastGeminiHeader);
+        Assert.Contains("whisper-large-v3-turbo", lastBody ?? "");
+        Assert.Contains("tr", lastBody ?? "");
+
+        var geminiText = await svc.TranscribeWithProviderAsync("gemini", wavPath, "en-US", store.Get().Speech!, CancellationToken.None);
+        Assert.Equal("Gemini transcript", geminiText);
+        Assert.Equal("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", lastUri?.ToString());
+        Assert.Null(lastAuth);
+        Assert.Equal(geminiKey, lastGeminiHeader);
+        Assert.Contains("\"mimeType\":\"audio/wav\"", lastBody ?? "");
+
+        var masked = SpeechService.SanitizePhoneError($"Failed keys {groqKey} and {geminiKey}", store.Get().Speech!);
+        Assert.DoesNotContain(groqKey, masked);
+        Assert.DoesNotContain(geminiKey, masked);
+    }
+
+    [Fact]
+    public async Task GeminiProvider_RejectsUnsafeModelIdAndCrossHostCredentials()
+    {
+        var store = CreateStore(new AgentConfig());
+        var svc = new SpeechService(
+            store,
+            CreatePushStore(),
+            new AgentEndpoint(),
+            new FakeAppleClient { IsSupported = false },
+            new FakeCapture(),
+            tempRoot: _dir,
+            rateLimiter: new SpeechRateLimiter(100, TimeSpan.FromSeconds(1)));
+
+        var badCfg = new SpeechConfig
+        {
+            Enabled = true,
+            Provider = "gemini",
+            GeminiApiKey = "AIzaSy_key",
+            GeminiModel = "../other/endpoint?key=leak",
+        };
+        badCfg.Normalize();
+
+        var testRes = await svc.TestProviderAsync(badCfg);
+        Assert.False(testRes.Ok);
+        Assert.Contains("Invalid Gemini model", testRes.Message);
+
+        var wavPath = Path.Combine(_dir, "gemini-bad.wav");
+        await File.WriteAllBytesAsync(wavPath, BuildTestWav(800));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            svc.TranscribeWithProviderAsync("gemini", wavPath, "en-US", badCfg, CancellationToken.None));
+
+        var geminiOnly = new SpeechConfig { GeminiApiKey = "only-gemini", Provider = "auto" };
+        geminiOnly.Normalize();
+        var (resolved, err) = svc.ResolveProvider(geminiOnly, SpeechWidgetSettings.Parse(null));
+        Assert.Null(err);
+        Assert.Equal("gemini", resolved);
+    }
+
     private sealed class StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

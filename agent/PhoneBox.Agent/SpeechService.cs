@@ -986,10 +986,22 @@ internal sealed partial class SpeechService : IDisposable
                     return (null, "OpenAI API key is not configured.");
                 return ("openai", null);
 
+            case "groq":
+                if (string.IsNullOrWhiteSpace(cfg.GroqApiKey))
+                    return (null, "Groq API key is not configured.");
+                return ("groq", null);
+
+            case "gemini":
+                if (string.IsNullOrWhiteSpace(cfg.GeminiApiKey))
+                    return (null, "Gemini API key is not configured.");
+                return ("gemini", null);
+
             case "auto":
                 if (IsAppleAutoAvailable()) return ("apple", null);
                 if (!string.IsNullOrWhiteSpace(cfg.OpenAiApiKey)) return ("openai", null);
-                return (null, "No speech provider configured (enable Apple Speech on macOS or add an OpenAI API key in Settings).");
+                if (!string.IsNullOrWhiteSpace(cfg.GroqApiKey)) return ("groq", null);
+                if (!string.IsNullOrWhiteSpace(cfg.GeminiApiKey)) return ("gemini", null);
+                return (null, "No speech provider configured (enable Apple Speech on macOS or add a cloud STT API key in Settings).");
 
             default:
                 return (null, $"Unsupported provider '{requested}'.");
@@ -1012,6 +1024,8 @@ internal sealed partial class SpeechService : IDisposable
             {
                 "apple" => await TestAppleAsync(cfg, ct),
                 "openai" => await TestOpenAiAsync(cfg, ct),
+                "groq" => await TestGroqAsync(cfg, ct),
+                "gemini" => await TestGeminiAsync(cfg, ct),
                 _ => new SpeechTestResult(false, provider, $"Unsupported provider '{provider}'."),
             };
         }
@@ -1032,6 +1046,8 @@ internal sealed partial class SpeechService : IDisposable
         {
             "apple" => TranscribeAppleAsync(wavPath, language, cfg, ct),
             "openai" => TranscribeOpenAiAsync(wavPath, language, cfg, ct),
+            "groq" => TranscribeGroqAsync(wavPath, language, cfg, ct),
+            "gemini" => TranscribeGeminiAsync(wavPath, language, cfg, ct),
             _ => throw new InvalidOperationException($"Unsupported speech provider '{provider}'."),
         };
     }

@@ -433,15 +433,17 @@ dd { margin: 0; word-break: break-all; }
 
       <div class="card" id="speechSettingsCard">
         <h3>Speech to text</h3>
-        <p class="hint" id="speechSetupBanner" style="margin:0 0 12px">Dictate from the panel using macOS Apple Speech Recognition or optional OpenAI Audio.</p>
+        <p class="hint" id="speechSetupBanner" style="margin:0 0 12px">Dictate from the panel using macOS Apple Speech Recognition or cloud STT APIs (OpenAI, Groq, Gemini).</p>
         <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" data-bind="speech.enabled"><span></span></label> Enable Speech to text</div>
         <p class="hint" style="margin:0 0 12px">Dictated transcripts and Note updates appear on an always-on desk screen; keep disabled or restrict widget control when unattended and avoid dictating secrets.</p>
         <div class="grid2">
           <div class="field"><label>Default provider</label>
             <select data-bind="speech.provider" id="speechProvider">
-              <option value="auto">Auto (Apple Speech › OpenAI)</option>
+              <option value="auto">Auto (Apple Speech › OpenAI › Groq › Gemini)</option>
               <option value="apple">Apple Speech Recognition (macOS)</option>
               <option value="openai">OpenAI Audio (Whisper / GPT-4o Transcribe)</option>
+              <option value="groq">Groq Whisper (whisper-large-v3-turbo)</option>
+              <option value="gemini">Google Gemini (Audio generateContent)</option>
             </select></div>
           <div class="field"><label>Default language (blank = auto, e.g. en-US, tr-TR)</label>
             <input type="text" data-bind="speech.language" placeholder="en-US" spellcheck="false"></div>
@@ -458,6 +460,14 @@ dd { margin: 0; word-break: break-all; }
           <div class="grid2">
             <div class="field"><label>OpenAI API key</label><input type="password" data-bind="speech.openAiApiKey" autocomplete="off"></div>
             <div class="field"><label>OpenAI model</label><input type="text" data-bind="speech.openAiModel" placeholder="gpt-4o-mini-transcribe" spellcheck="false"></div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label>Groq API key</label><input type="password" data-bind="speech.groqApiKey" autocomplete="off"></div>
+            <div class="field"><label>Groq model</label><input type="text" data-bind="speech.groqModel" placeholder="whisper-large-v3-turbo" spellcheck="false"></div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label>Gemini API key</label><input type="password" data-bind="speech.geminiApiKey" autocomplete="off"></div>
+            <div class="field"><label>Gemini model</label><input type="text" data-bind="speech.geminiModel" placeholder="gemini-2.5-flash" spellcheck="false"></div>
           </div>
         </details>
 
@@ -1703,6 +1713,8 @@ function ensureSpeechDefaults() {
   const defaults = {
     enabled: false, provider: 'auto', language: '', maxRecordSec: 90, appleOnDevice: false,
     openAiApiKey: '', openAiModel: 'gpt-4o-mini-transcribe',
+    groqApiKey: '', groqModel: 'whisper-large-v3-turbo',
+    geminiApiKey: '', geminiModel: 'gemini-2.5-flash',
     saveTranscripts: false, transcriptDir: '', transcriptFormat: 'daily-md', saveAudioCopy: false, historyLimit: 15,
   };
   for (const [k, v] of Object.entries(defaults)) cfg.speech[k] ??= v;

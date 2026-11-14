@@ -7,7 +7,7 @@ namespace PhoneBox.Agent;
 /// <summary>Global settings for the Speech to text widget, speech providers, and transcript disk logging.</summary>
 public sealed class SpeechConfig
 {
-    public static readonly string[] ValidProviders = ["auto", "apple", "openai"];
+    public static readonly string[] ValidProviders = ["auto", "apple", "openai", "groq", "gemini"];
     public static readonly string[] ValidTranscriptFormats = ["daily-md", "daily-txt", "single-md", "per-item-txt", "jsonl"];
 
     public bool Enabled { get; set; }
@@ -18,6 +18,10 @@ public sealed class SpeechConfig
 
     public string OpenAiApiKey { get; set; } = "";
     public string OpenAiModel { get; set; } = "gpt-4o-mini-transcribe";
+    public string GroqApiKey { get; set; } = "";
+    public string GroqModel { get; set; } = "whisper-large-v3-turbo";
+    public string GeminiApiKey { get; set; } = "";
+    public string GeminiModel { get; set; } = "gemini-2.5-flash";
 
     public bool SaveTranscripts { get; set; }
     public string TranscriptDir { get; set; } = "";
@@ -33,6 +37,10 @@ public sealed class SpeechConfig
 
         OpenAiApiKey = TrimMax(OpenAiApiKey, 512);
         OpenAiModel = DefaultIfEmpty(TrimMax(OpenAiModel, 128), "gpt-4o-mini-transcribe");
+        GroqApiKey = TrimMax(GroqApiKey, 512);
+        GroqModel = DefaultIfEmpty(TrimMax(GroqModel, 128), "whisper-large-v3-turbo");
+        GeminiApiKey = TrimMax(GeminiApiKey, 512);
+        GeminiModel = DefaultIfEmpty(TrimMax(GeminiModel, 128), "gemini-2.5-flash");
 
         TranscriptDir = CleanPathField(TranscriptDir, 512);
         TranscriptFormat = NormalizeEnum(TranscriptFormat, ValidTranscriptFormats, "daily-md");
@@ -42,6 +50,8 @@ public sealed class SpeechConfig
     internal IEnumerable<string?> EnumerateSecrets()
     {
         yield return OpenAiApiKey;
+        yield return GroqApiKey;
+        yield return GeminiApiKey;
     }
 
     internal static string NormalizeEnum(string? value, string[] allowed, string fallback)
@@ -80,7 +90,7 @@ public sealed record SpeechWidgetSettings(
     bool Control,
     string TranscriptDir = "")
 {
-    public static readonly string[] ValidWidgetProviders = ["default", "auto", "apple", "openai"];
+    public static readonly string[] ValidWidgetProviders = ["default", "auto", "apple", "openai", "groq", "gemini"];
     public static readonly string[] ValidModes = ["toggle", "hold"];
     public static readonly string[] ValidNoteModes = ["append", "prepend", "bullet", "timestamp", "replace"];
     public static readonly string[] ValidSavePolicies = ["default", "always", "never"];
