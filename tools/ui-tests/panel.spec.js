@@ -185,6 +185,46 @@ test('a GPU without sensors (Apple) shows its memory, not 0 degrees', async ({ p
   expect(labels).toEqual({ gpu: '2 / 16 GB memory', temp: 'No GPU data', ram: '9.5 / 16 GB', nvidia: '61°C · 120 W', nvidiaTemp: 'Fan 30% · 1800 MHz' });
 });
 
+test('an AMD or Intel GPU without vendor tools shows its temperature, power share and shared memory', async ({ page }) => {
+  await page.goto('/panel/');
+  await expect(page.locator('.w').first()).toBeVisible();
+  const labels = await page.evaluate(async () => {
+    const { METRICS } = await import('/panel/main.js');
+    // what Windows itself reports for a Radeon card (D3DKMT + GPU counters), no LibreHardwareMonitor
+    const amd = { pc: { gpu: { name: 'AMD Radeon RX 7900 XTX', vendor: 'amd', util: 12, temp: 54.2, power: null, powerPct: 11.7, vramUsed: 6, vramTotal: 24 } } };
+    // an integrated GPU lives on shared memory: dedicated + shared is what counts
+    const igpu = { pc: { gpu: { name: 'Intel(R) UHD Graphics 770', integrated: true, util: 3, temp: null, vramUsed: 0.1, vramTotal: 0.1, sharedUsed: 1.4, sharedTotal: 15.9 } } };
+    const lhm = { pc: { gpu: { name: 'AMD Radeon RX 7900 XTX', temp: 52, hotSpot: 71, memTemp: 58, power: 312, powerLimit: 339, fan: 42 } } };
+    return { amd: METRICS.gpu.sub(amd), amdPower: METRICS.gpupower.sub(amd), amdPowerUnit: METRICS.gpupower.unit(amd),
+      igpu: METRICS.vram.sub(igpu), hot: METRICS.hotspot.sub(lhm), hotMissing: METRICS.hotspot.sub(amd), temp: METRICS.gputemp.sub(lhm) };
+  });
+  expect(labels).toEqual({ amd: '54°C · 12% power', amdPower: 'of the power limit', amdPowerUnit: '%', igpu: '1.5 / 16 GB',
+    hot: 'Edge 52° · Memory 58°', hotMissing: 'needs LibreHardwareMonitor', temp: 'Hot spot 71° · Fan 42%' });
+});
+
+test('the GPU details widget shows the main card and the integrated one', async ({ page }) => {
+  const errors = watchErrors(page);
+  await page.goto('/panel/');
+  await page.evaluate(() => {
+    const cfg = JSON.parse(localStorage.getItem('pb-demo-config') || 'null');
+    const pages = [{ id: 'gpus', title: 'GPUs', icon: '🎮', enabled: true, widgets: [
+      { id: 'g0', type: 'gpu', x: 0, y: 0, w: 6, h: 6, options: { adapter: '0' } },
+      { id: 'g1', type: 'gpu', x: 6, y: 0, w: 6, h: 6, options: { adapter: '1' } }] }];
+    localStorage.setItem('pb-demo-config', JSON.stringify({ ...(cfg || {}), pages, shortcuts: cfg?.shortcuts || [] }));
+  });
+  await page.reload();
+  const [main, igpu] = [page.locator('.w-gpu').nth(0), page.locator('.w-gpu').nth(1)];
+  await expect(main.locator('.s-name')).toHaveText('GeForce RTX 4080');
+  await expect(main.locator('.s-label')).toHaveText('NVIDIA');
+  await expect(main).toContainText('VRAM');
+  await expect(main).toContainText('/ 320 W');
+  await expect(main).toContainText('Driver 596.36');
+  await expect(igpu.locator('.s-label')).toHaveText('AMD · iGPU');
+  await expect(igpu).toContainText('GPU memory');
+  await expect(igpu).toContainText('% of limit');
+  expect(errors).toEqual([]);
+});
+
 test('portrait arranges the widgets in six columns', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 780 });
   await page.goto('/panel/');

@@ -69,6 +69,10 @@ public sealed class AgentConfig
 
     public bool AllowKill() => Widgets(enabledPagesOnly: true)
         .Any(w => w.Type == "processes" && w.Bool("allowKill") != false);
+
+    /// <summary>True when an enabled page (including enabled Smart Stack children) shows the quota cost overview card.</summary>
+    public bool ShowQuotaOverview() => Widgets(enabledPagesOnly: true)
+        .Any(w => w.Type is "codexbar" or "quotas" && w.Bool("showOverview") == true);
 }
 
 public sealed class WeatherConfig
@@ -90,6 +94,8 @@ public sealed class DisplayConfig
 {
     public AppearanceConfig? Appearance { get; set; }
     public bool ShowSeconds { get; set; } = true;
+    /// <summary>Show clock times as "2:05 PM" instead of "14:05".</summary>
+    public bool Hour12 { get; set; }
     /// <summary>Return to the first page after this many idle seconds; 0 = never.</summary>
     public int IdleReturnSec { get; set; } = 90;
     /// <summary>Vibrate when a session finishes or needs input.</summary>
