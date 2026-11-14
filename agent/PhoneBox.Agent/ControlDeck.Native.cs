@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 namespace PhoneBox.Agent;
 
-internal sealed partial class WindowsDeckNative : IDeckNative
+internal sealed partial class WindowsDeckNative(MediaMonitor? mediaMonitor = null) : IDeckNative
 {
     private readonly Lock _gate = new();
     private readonly Dictionary<string, (WasapiPlayer Output, WaveStream Reader, MMDevice Device)> _sounds = [];
@@ -146,7 +146,8 @@ internal sealed partial class WindowsDeckNative : IDeckNative
     public async Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct)
     {
         _media ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-        var result = new List<DeckMedia>();
+        var currentSession = _media.GetCurrentSession();
+        var result = new List<(DeckMedia Item, bool IsCurrent)>();
         foreach (var session in _media.GetSessions())
         {
             ct.ThrowIfCancellationRequested();
@@ -160,22 +161,25 @@ internal sealed partial class WindowsDeckNative : IDeckNative
             var name = session.SourceAppUserModelId;
             if (name.Contains("Spotify", StringComparison.OrdinalIgnoreCase)) name = "Spotify";
             else if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = Path.GetFileNameWithoutExtension(name);
-            result.Add(new(session.SourceAppUserModelId, name, properties.Title,
+            result.Add((new(session.SourceAppUserModelId, name, properties.Title,
                 info.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
                 Math.Clamp(position, 0, duration), duration,
                 info.Controls.IsPlaybackPositionEnabled, info.Controls.IsShuffleEnabled, info.Controls.IsRepeatEnabled,
-                info.IsShuffleActive ?? false, info.AutoRepeatMode?.ToString() ?? "None"));
+                info.IsShuffleActive ?? false, info.AutoRepeatMode?.ToString() ?? "None"),
+                ReferenceEquals(session, currentSession)));
         }
-        var current = _media.GetCurrentSession()?.SourceAppUserModelId;
-        return result.OrderByDescending(s => s.Id == current).ToArray();
+        return result.OrderByDescending(x => x.IsCurrent).Select(x => x.Item).ToArray();
     }
-    public async Task<bool> MediaAction(string id, string action, long value, CancellationToken ct)
+    public async Task<(bool Ok, bool WasPlaying)> MediaActionWithState(string id, string action, long value, CancellationToken ct)
     {
         _media ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-        var s = _media.GetSessions().FirstOrDefault(s => s.SourceAppUserModelId == id);
-        if (s is null) return false;
+        var cur = _media.GetCurrentSession();
+        var s = (cur?.SourceAppUserModelId == id ? cur : null) ?? _media.GetSessions().FirstOrDefault(x => x.SourceAppUserModelId == id);
+        if (s is null) return (false, false);
         ct.ThrowIfCancellationRequested();
-        return action switch
+        var wasPlaying = action == "playpause"
+            && s.GetPlaybackInfo().PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+        var ok = action switch
         {
             "playpause" => await s.TryTogglePlayPauseAsync(), "next" => await s.TrySkipNextAsync(),
             "prev" => await s.TrySkipPreviousAsync(), "pause" => await s.TryPauseAsync(),
@@ -187,6 +191,21 @@ internal sealed partial class WindowsDeckNative : IDeckNative
                 await s.TryChangeAutoRepeatModeAsync((MediaPlaybackAutoRepeatMode)value),
             _ => false,
         };
+        return (ok, wasPlaying);
+    }
+    public async Task<bool> MediaAction(string id, string action, long value, CancellationToken ct) =>
+        (await MediaActionWithState(id, action, value, ct)).Ok;
+
+    public async Task<bool> PauseCurrentMedia(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (mediaMonitor is not null) return await mediaMonitor.PauseAsync();
+        _media ??= await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+        var s = _media.GetCurrentSession();
+        if (s is null || s.GetPlaybackInfo().PlaybackStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+            return false;
+        ct.ThrowIfCancellationRequested();
+        return await s.TryPauseAsync();
     }
 
     public void Play(string id, string file, string? device, int volume)

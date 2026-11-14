@@ -62,6 +62,18 @@ internal interface IDeckNative : IDisposable
     string? ActionState(DeckAction action) => null;
     Task<IReadOnlyList<DeckMedia>> Media(CancellationToken ct);
     Task<bool> MediaAction(string id, string action, long value, CancellationToken ct);
+    async Task<(bool Ok, bool WasPlaying)> MediaActionWithState(string id, string action, long value, CancellationToken ct)
+    {
+        var wasPlaying = false;
+        if (action == "playpause")
+        {
+            try { wasPlaying = (await Media(ct)).FirstOrDefault(p => p.Id == id)?.Playing == true; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { }
+        }
+        return (await MediaAction(id, action, value, ct), wasPlaying);
+    }
+    Task<bool> PauseCurrentMedia(CancellationToken ct) => Task.FromResult(false);
     void Play(string id, string file, string? device, int volume);
     void StopSound(string? id);
     IReadOnlyList<DeckItem> MidiPorts();
