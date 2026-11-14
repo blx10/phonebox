@@ -29,6 +29,8 @@
   that music stops the radio (#29).
 - Radio widget (#20): station cards with logos (from the station's own logo URL, or, if allowed in Settings, looked up
   in public radio directories) or a sliding card row; a tap on a playing station stops it.
+- A tap on a CPU or RAM tile, gauge or chart, or on Memory & disks, opens the Processes page sorted by that resource;
+  the Processes widgets show the total CPU and RAM use, and app icons are cached instead of loaded on every refresh (#35).
 - Radio stations can be switched off and put in order in Settings › Control Deck; ⏮ / ⏭ skip switched-off
   stations (#27). Stations can be imported by country from radio-browser.info, and the configured streams checked (#28).
 
