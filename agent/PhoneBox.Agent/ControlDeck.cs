@@ -620,20 +620,20 @@ public sealed partial class ControlDeck : BackgroundService
         finally { _focusGate.Release(); }
     }
 
+    /// <summary>How long pausing the other media may take once a station plays (it has its own budget, see below).</summary>
+    internal TimeSpan MediaPauseTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
     private async Task<bool> StartRadioAndPauseMediaCoreAsync(DeckAction action, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         if (!StartRadio(action)) return false;
-        try
-        {
-            await PauseActiveSystemMediaAsync(ct);
-            return true;
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            StopRadio(action.Id, clearLast: true);
-            throw;
-        }
+        // The station plays now, and that is what was asked for. Pausing the other media is best effort with its own
+        // time budget: a slow stream open can outlast the panel's request (2.5 s), and cancelling the request must not
+        // stop the station that just started.
+        using var pause = new CancellationTokenSource(MediaPauseTimeout);
+        try { await PauseActiveSystemMediaAsync(pause.Token); }
+        catch (OperationCanceledException) { _log.LogDebug("Pausing the other media timed out after radio {Id} started", action.Id); }
+        return true;
     }
 
     public Task<bool?> TryControlRadioMediaAsync(string action, MediaSnapshot? systemMedia, CancellationToken ct) =>

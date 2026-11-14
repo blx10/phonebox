@@ -414,7 +414,7 @@ public sealed class ControlDeckTests
     }
 
     [Fact]
-    public async Task CancellingRadioMediaPauseRollsBackStartedRadio()
+    public async Task CancellingTheRequestDoesNotStopAStationThatStarted()
     {
         var dir = Path.Combine(Path.GetTempPath(), "phonebox-radio-cancel-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -440,17 +440,22 @@ public sealed class ControlDeckTests
                 return false;
             };
 
-            using var deck = new ControlDeck(new ConfigStore(cfgPath), native, NullLogger<ControlDeck>.Instance);
+            using var deck = new ControlDeck(new ConfigStore(cfgPath), native, NullLogger<ControlDeck>.Instance)
+            {
+                MediaPauseTimeout = TimeSpan.FromMilliseconds(200),
+            };
             using var cts = new CancellationTokenSource();
 
             var actTask = deck.Act("action", "r-1", "", null, null, null, cts.Token);
             await pauseStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
             Assert.Contains("r-1", native.PlayingRadios);
 
+            // the panel's request gives up (a slow stream open outlasted its timeout): the station keeps playing,
+            // and the stuck pause gives up on its own budget
             cts.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => actTask);
-            Assert.Empty(native.PlayingRadios);
-            Assert.Null(deck.EffectiveMedia(null));
+            await actTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Contains("r-1", native.PlayingRadios);
+            Assert.Equal("Internet Radio", deck.EffectiveMedia(null)?.App);
         }
         finally
         {
