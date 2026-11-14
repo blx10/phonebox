@@ -209,3 +209,41 @@ test('desktop settings font and font size controls preview and persist',async({p
   expect(await css(page.locator('.w-audio-mixer'),'fontFamily')).toMatch(/Mono|monospace/i);
   expect(parseFloat(await css(page.locator('.w-audio-mixer .w-title'),'fontSize'))).toBeCloseTo(22,0);
 });
+
+test('compact 4-limit quota percentage text scales with widget fontScale',async({page})=>{
+  const sampleQuota = {
+    providers: [{
+      id: 'claude', name: 'Claude', plan: 'Max', updatedAt: Date.now(),
+      limits: [
+        { label: '5h', percent: 40, resetsAt: Date.now() + 3600_000 },
+        { label: '7d', percent: 55, resetsAt: Date.now() + 86400_000 },
+        { label: 'Opus', percent: 25, resetsAt: Date.now() + 86400_000 },
+        { label: 'Sonnet', percent: 70, resetsAt: Date.now() + 86400_000 },
+      ],
+    }],
+  };
+  await page.goto('/panel/');
+  await page.evaluate(()=>{
+    localStorage.clear();
+    localStorage.setItem('pb-demo-config',JSON.stringify({
+      night:{enabled:false},shortcuts:[],display:{idleReturnSec:0},
+      pages:[{id:'q',title:'Quotas',widgets:[
+        {id:'q1',type:'quotas',x:0,y:0,w:6,h:6,appearance:{fontScale:100},options:{providers:['claude']}},
+        {id:'q2',type:'quotas',x:6,y:0,w:6,h:6,appearance:{fontScale:150},options:{providers:['claude']}}
+      ]}]
+    }));
+  });
+  await page.reload();
+  await expect(page.locator('.w-quotas')).toHaveCount(2);
+  await page.evaluate(async(q)=>{
+    const { D, emit } = await import('/panel/main.js');
+    D.quotas = q;
+    emit('quotas');
+  }, sampleQuota);
+  await expect(page.locator('.q-rings-grid .q-pct')).toHaveCount(8);
+  const basePct = parseFloat(await css(page.locator('.w-quotas').nth(0).locator('.q-rings-grid .q-pct').first(),'fontSize'));
+  const scaledPct = parseFloat(await css(page.locator('.w-quotas').nth(1).locator('.q-rings-grid .q-pct').first(),'fontSize'));
+  expect(basePct).toBeCloseTo(22, 0);
+  expect(scaledPct).toBeCloseTo(33, 0);
+});
+
