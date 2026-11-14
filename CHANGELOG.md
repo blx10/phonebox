@@ -24,6 +24,13 @@
   pace and reset notes (#23); an optional cost overview card with the spend and tokens of the last 30 days and the
   top models (#24, #25), off by default; the widget's provider list offers the providers CodexBar currently reports and
   keeps saved ones that are offline (#26).
+- Internet radio in Now Playing (#17): the station playing on the computer shows as the track, with its play time;
+  ⏮ / ⏭ switch stations and ⏯ stops and resumes. Starting a station pauses the music that was playing, and resuming
+  that music stops the radio (#29).
+- Radio widget (#20): station cards with logos (from the station's own logo URL, or, if allowed in Settings, looked up
+  in public radio directories) or a sliding card row; a tap on a playing station stops it.
+- Radio stations can be switched off and put in order in Settings › Control Deck; ⏮ / ⏭ skip switched-off
+  stations (#27). Stations can be imported by country from radio-browser.info, and the configured streams checked (#28).
 
 **Agent**
 - AMD and Intel GPUs (#49). On Windows the agent reads every GPU the way Task Manager does, with no vendor tool: its
@@ -39,6 +46,10 @@
 - Quota rules keep firing on the last known limits while a provider reports an error; providers CodexBar stops
   reporting no longer keep stale limits (#23).
 - macOS and Linux: cover art that arrives late is picked up, and the art of a finished track no longer lingers (#34).
+- Radio streams in HLS (`.m3u8`) play on Windows, on the chosen output device (#18). On Linux and macOS, sound and
+  radio controls play through `ffplay`, `mpv` or `vlc`, whichever is installed (#33).
+- Radio directory imports refuse stream addresses inside a home network (`router`, `nas.lan`, `192.168.1.1.nip.io`);
+  logo downloads and stream checks only connect to public addresses and never follow a redirect from https to http.
 
 ## 0.9.4 — 2026-11-11
 
