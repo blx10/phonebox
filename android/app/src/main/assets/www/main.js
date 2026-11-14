@@ -27,7 +27,7 @@ export const ROWS = 6;
 export const $ = (id) => document.getElementById(id);
 // The native bridge (window.Android) is in every frame, sandboxed widgets included, so each call carries a key that only
 // the panel's own frames receive (MainActivity.bridgeKey). This wrapper adds it.
-const BRIDGE = ['battery', 'buzz', 'haptic', 'pcs', 'selectPc', 'forgetPc', 'setBrightness', 'setHomeScreen', 'setOrientation',
+const BRIDGE = ['battery', 'buzz', 'haptic', 'is24Hour', 'pcs', 'selectPc', 'forgetPc', 'setBrightness', 'setHomeScreen', 'setOrientation',
   'setPinned', 'setVolumeKeys', 'transport', 'sensors', 'version'];
 export const bridge = typeof Android === 'undefined' ? null : Object.fromEntries(BRIDGE.filter((m) => typeof Android[m] === 'function')
   .map((m) => [m, (...args) => Android[m](window.__phoneboxKey || '', ...args)]));
@@ -117,8 +117,16 @@ export function h(tag, cls, ...kids) {
 }
 
 export const pad = (n) => String(n).padStart(2, '0');
-// Clock times follow display.hour12: "14:05" (default) or "2:05 PM". Pass hours 0-23.
-export const hour12 = () => cfg.display?.hour12 === true;
+// Clock times follow display.hour12: false ("14:05", default), true ("2:05 PM") or "auto" (follow the phone). Pass hours 0-23.
+export function hour12() {
+  const pref = cfg.display?.hour12;
+  if (pref === true || pref === 'true') return true;
+  if (pref === 'auto') {
+    try { if (bridge?.is24Hour) return !bridge.is24Hour(); } catch (_) {}
+    try { return Boolean(new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hour12); } catch (_) {}
+  }
+  return false;
+}
 export const fmtClock = (H, M) => (hour12() ? `${H % 12 || 12}:${pad(M)} ${H < 12 ? 'AM' : 'PM'}` : `${pad(H)}:${pad(M)}`);
 export const fmtHM = (d) => fmtClock(d.getHours(), d.getMinutes());
 export const fmtTime = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ':' + pad(s % 60); };
@@ -813,6 +821,7 @@ export let pages = [];       // enabled pages
 export let mounted = [];     // { pi, def, inst, ctx, dirty }
 export let layoutKey = '';
 export let curPage = 0;
+let lastHour12 = null;
 
 export const isPortrait = () => window.innerHeight > window.innerWidth * 1.05;
 
@@ -833,9 +842,11 @@ export function buildLayout() {
   const enabled = (cfg.pages || []).filter((p) => p.enabled !== false && Array.isArray(p.widgets));
   const next = enabled.length ? enabled : FALLBACK_PAGES;
   const portrait = isPortrait();
-  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, cfg.display?.hour12, cfg.display?.appearance, portrait]);
+  const h12 = hour12();
+  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, cfg.display?.hour12, h12, cfg.display?.appearance, portrait]);
   if (key === layoutKey) return;
   layoutKey = key;
+  lastHour12 = h12;
   const prevId = pages[curPage]?.id;
   pages = next;
   for (const m of mounted) { try { m.inst.destroy?.(); } catch (_) {} }
@@ -1353,6 +1364,7 @@ window.onAndroidSensor = (kind, value) => {
 };
 
 export function tick() {
+  if (lastHour12 !== null && hour12() !== lastHour12) { buildLayout(); renderRulesBtn(); }
   const now = new Date();
   $('nClock').textContent = fmtHM(now);
   $('nDate').textContent = now.toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long' });
@@ -1378,6 +1390,7 @@ export function applyDisplay() {
   document.documentElement.style.setProperty('--accent', `rgb(${DEFAULT_AMBIENT})`);
   artTint = d.artTint !== false;
   if (before !== DEFAULT_AMBIENT || !artTint) setAmbient(artTint ? currentArtColor : null);
+  renderRulesBtn();
   if (PREVIEW || !bridge) return;
   try { bridge.setVolumeKeys && bridge.setVolumeKeys(d.volumeKeys !== false); } catch (_) {}
   try { bridge.setPinned && bridge.setPinned(d.pin === true); } catch (_) {}
@@ -1518,6 +1531,13 @@ setInterval(() => { if (online && anyNeeds('calendar')) loadCalendar(); }, 120_0
 setInterval(() => { if (online && anyNeeds('work') && !streaming()) loadWork(); }, 3000);
 setInterval(() => { if (online && pageOf('procs')) loadProcs(); if (online && sheet) loadSheet(); }, 2000);
 setInterval(() => { if (online) loadConfig(); }, 60_000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && lastHour12 !== null && hour12() !== lastHour12) {
+    buildLayout();
+    renderRulesBtn();
+    $('nClock').textContent = fmtHM(new Date());
+  }
+});
 poll();
 
 if (PREVIEW) {
