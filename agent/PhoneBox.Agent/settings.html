@@ -455,6 +455,7 @@ dd { margin: 0; word-break: break-all; }
           <select data-bind="display.orientation"><option value="landscape">Landscape</option><option value="portrait">Portrait</option><option value="auto">Follow the phone</option></select>
           <span class="hint">You design pages in landscape; in portrait the panel arranges the widgets by itself, top to bottom. Tablets use the same pages, just bigger.</span></div>
         <label class="check"><input type="checkbox" data-bind="display.showSeconds"> Show seconds on the clock</label>
+        <label class="check"><input type="checkbox" data-bind="display.hour12"> 12-hour times (2:05 PM instead of 14:05)</label>
         <label class="check"><input type="checkbox" data-bind="display.vibrate"> Vibrate when a session finishes or needs input</label>
         <label class="check"><input type="checkbox" data-bind="display.volumeKeys"> The phone's volume keys switch pages</label>
         <label class="check"><input type="checkbox" data-bind="display.autoBrightness"> Brightness follows the room (light sensor)</label>
@@ -546,6 +547,7 @@ dd { margin: 0; word-break: break-all; }
           <div class="field"><label>Path to adb.exe (empty = auto-detect)</label><input type="text" data-bind="adbPath" placeholder="auto-detected"><span class="hint" id="adbFound"></span></div>
         </div>
         <p id="usbProblem" hidden style="margin:10px 0 0;font-size:13px;color:var(--warn)"></p>
+        <p id="webviewProblem" hidden style="margin:10px 0 0;font-size:13px;color:var(--warn)"></p>
       </div>
       <div class="card">
         <h3>Phones</h3>
@@ -786,6 +788,7 @@ function widgetSummary(w) {
     case 'quotaring': return `${choice('provider')} · ${choice('limit').split(' (')[0]}`;
     case 'analog': return o.label || o.zone || '';
     case 'topprocs': case 'breathe': return choice(w.type === 'topprocs' ? 'sort' : 'pattern');
+    case 'gpu': return choice('adapter');
     case 'timer': case 'counter': return o.label || '';
     case 'checklist': return `${o.title || 'Today'} · ${(o.items || d.options[1].default).length} items`;
     case 'exchange': return `${o.base || 'EUR'} → ${(o.symbols || d.options[1].default).join(', ')}`;
@@ -1385,10 +1388,12 @@ function renderPhones() {
     const conf = cfg.phones.find((x) => x.id === ph.id);
     const chosen = conf?.pages || null;
     const all = !chosen?.length;
+    const wvMajor = ph.webView ? ph.webView.split('/')[1]?.split(/[.-]/)[0] : '';
     return h('div', { class: 'phone-row' },
       h('div', { class: 'row' },
         h('input', { type: 'text', value: conf?.name || '', placeholder: ph.model || 'Phone', style: { maxWidth: '220px' }, oninput: (e) => { entry(ph.id).name = e.target.value; changed(); } }),
-        h('span', { class: 'hint' }, `${ph.model || 'Android device'} · ${ago(ph.lastSeen)}${ph.via ? ' over ' + ph.via : ''}`)),
+        h('span', { class: 'hint' }, `${ph.model || 'Android device'} · ${ago(ph.lastSeen)}${ph.via ? ' over ' + ph.via : ''}${wvMajor ? ' · WebView ' + wvMajor : ''}`)),
+      ph.webviewProblem ? h('p', { class: 'hint', style: { margin: '6px 0 0', color: 'var(--warn)' } }, '⚠ ' + ph.webviewProblem) : null,
       h('label', { class: 'check', style: { marginTop: '8px' } },
         h('input', { type: 'checkbox', checked: all, onchange: (e) => { entry(ph.id).pages = e.target.checked ? null : cfg.pages.map((p) => p.id).filter(Boolean); changed(); renderPhones(); } }),
         'Shows all pages'),
@@ -1954,14 +1959,24 @@ function appearanceEditor(owner, parents, label, widget = false) {
     } }, ...[['', 'Inherit / current look'], ['default', 'Original appearance'], ['cards', 'Rounded cards'], ['flat', 'Flat surfaces'], ['borderless', 'Content only'], ['seamless', 'Seamless panel']]
       .map(([value, text]) => h('option', { value, selected: (owner.appearance?.style || '') === value }, text)));
     const fields = [h('div', { class: 'field' }, h('label', {}, 'Surface style'), style)];
-    const numeric = (key, title, max, fallback) => {
+    const fontLabels = { default: 'Original font', sans: 'Sans-serif', rounded: 'Rounded', condensed: 'Condensed', serif: 'Serif', mono: 'Monospace' };
+    const inheritedFont = (() => {
+      const inherited = { ...(owner.appearance || {}) }; delete inherited.font;
+      return PhoneBoxAppearance.resolve(...parents(), inherited).font;
+    })();
+    fields.push(h('div', { class: 'field' }, h('label', {}, 'Font'),
+      h('select', { 'aria-label': 'Font', onchange: e => { set('font', e.target.value || null); render(); } },
+        h('option', { value: '', selected: owner.appearance?.font == null }, !inheritedFont || inheritedFont === 'default' ? 'Original widget font' : 'Inherit (' + fontLabels[inheritedFont] + ')'),
+        ...Object.entries(fontLabels).map(([value, text]) => h('option', { value, selected: owner.appearance?.font === value }, text)))));
+    const numeric = (key, title, max, fallback, min = 0, step = 1, unit = ' px') => {
       const value = current[key];
-      const output = h('output', { style: { minWidth: '80px', fontVariantNumeric: 'tabular-nums' } }, value == null ? 'Automatic' : value + ' px');
-      const input = h('input', { type: 'range', min: 0, max, step: 1, value: value ?? fallback, 'aria-label': title, style: { flex: '1', minWidth: '60px' } });
-      input.oninput = () => { set(key, Number(input.value)); output.textContent = input.value + ' px'; };
+      const output = h('output', { style: { minWidth: '80px', fontVariantNumeric: 'tabular-nums' } }, value == null ? 'Automatic' : value + unit);
+      const input = h('input', { type: 'range', min, max, step, value: value ?? fallback, 'aria-label': title, style: { flex: '1', minWidth: '60px' } });
+      input.oninput = () => { set(key, Number(input.value)); output.textContent = input.value + unit; };
       const reset = h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Inherit ' + title.toLowerCase(), onclick: () => { set(key, null); render(); } }, 'Inherit');
       fields.push(h('div', { class: 'field' }, h('label', {}, title), h('div', { class: 'row', style: { gap: '10px' } }, input, output, reset)));
     };
+    numeric('fontScale', 'Font size', 200, 100, 50, 5, '%');
     numeric('radius', 'Corner radius', 32, 16);
     if (!widget) numeric('gap', 'Widget spacing', 24, 8);
     numeric('padding', 'Widget inner padding', 24, 12);
@@ -2078,6 +2093,8 @@ async function loadInfo() {
     $('appMissing').hidden = !(i.appMissing && i.appMissing.length);
     $('usbProblem').hidden = !i.usbProblem;
     $('usbProblem').textContent = i.usbProblem ? '⚠ ' + i.usbProblem : '';
+    $('webviewProblem').hidden = !i.webviewProblem;
+    $('webviewProblem').textContent = i.webviewProblem ? '⚠ ' + i.webviewProblem : '';
     if (i.appMissing?.length) $('appMissingText').textContent = `${i.appMissing.join(', ')} has no PhoneBox app yet`;
     const sel = $('serial');
     const cur = cfg.deviceSerial || '';
