@@ -108,6 +108,25 @@ test('two counters in a stack keep separate values after reload', async ({ page 
   await expect(page.locator('.stack-item.active .ct-n')).toHaveText('2');
 });
 
+for (const hour12 of [false, true]) {
+  test(`clock times follow display.hour12 (${hour12})`, async ({ browser, baseURL }) => {
+    const ctx = await browser.newContext({ baseURL, viewport: { width: 780, height: 360 }, timezoneId: 'UTC' });
+    const page = await ctx.newPage();
+    await page.clock.setFixedTime(new Date('2026-11-12T14:05:00Z'));
+    await layout(page, [
+      { id: 'c', type: 'clock', x: 0, y: 0, w: 6, h: 3, options: { weather: false, status: false } },
+      { id: 'wc', type: 'worldclock', x: 6, y: 0, w: 6, h: 3, options: { zones: ['UTC=Etc/UTC', 'Tokyo=Asia/Tokyo'] } },
+      { id: 'cd', type: 'countdown', x: 0, y: 3, w: 6, h: 3, options: { target: '2026-12-24 09:30' } },
+    ], { display: { idleReturnSec: 0, hour12 } });
+    await expect(page.locator('.clock .hh')).toHaveText(hour12 ? '2' : '14');
+    await expect(page.locator('.clock .ap')).toHaveText(hour12 ? 'PM' : '');
+    await expect(page.locator('.wc-t')).toHaveText(hour12 ? ['2:05 PM', '11:05 PM'] : ['14:05', '23:05']);
+    await expect(page.locator('.cd-s')).toContainText(hour12 ? '9:30 AM' : '09:30');
+    await page.screenshot({ path: `test-results/hour12-${hour12}.png` });
+    await ctx.close();
+  });
+}
+
 test('multi option preserves saved unlisted quota provider IDs when toggling choices', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 860 });
   await layout(page, [widget('quotas', { providers: ['claude', 'alibaba'] })]);
