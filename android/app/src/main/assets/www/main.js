@@ -74,10 +74,25 @@ export let pushVersion = null;
 export const D = { state: null, quotas: null, work: null, procs: null, push: {}, weather: null, calendar: null, notes: store.get('notes', []) };
 
 export const HIST = 90;
-export const hist = { cpu: [], gpu: [], ram: [], vram: [], down: [], up: [], ping: [], gputemp: [], cputemp: [] };
+export const hist = { cpu: [], gpu: [], ram: [], vram: [], down: [], up: [], ping: [], gputemp: [], cputemp: [], hotspot: [], gpupower: [], gpuclock: [] };
 export const pushHist = (k, v) => { const a = hist[k]; a.push(v ?? 0); if (a.length > HIST) a.shift(); };
 
 // ---------------------------------------------------------------- helpers
+/** fetch() to the panel's local/USB feed proxy when the phone cannot reach an allowed public HTTPS feed directly. */
+export async function safeFetch(url, opts = {}) {
+  try {
+    return await fetch(url, opts);
+  } catch (e) {
+    if (!opts.signal?.aborted && typeof url === 'string' && url.startsWith('https://')) {
+      return await fetch(`${API}/proxy?url=${encodeURIComponent(url)}`, {
+        ...opts,
+        headers: { ...(opts.headers || {}), ...PANEL_HEADERS },
+      });
+    }
+    throw e;
+  }
+}
+
 export async function api(path, method = 'GET', timeout = 2500) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeout);
@@ -102,6 +117,10 @@ export function h(tag, cls, ...kids) {
 }
 
 export const pad = (n) => String(n).padStart(2, '0');
+// Clock times follow display.hour12: "14:05" (default) or "2:05 PM". Pass hours 0-23.
+export const hour12 = () => cfg.display?.hour12 === true;
+export const fmtClock = (H, M) => (hour12() ? `${H % 12 || 12}:${pad(M)} ${H < 12 ? 'AM' : 'PM'}` : `${pad(H)}:${pad(M)}`);
+export const fmtHM = (d) => fmtClock(d.getHours(), d.getMinutes());
 export const fmtTime = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ':' + pad(s % 60); };
 export function fmtRate(bps) {
   if (bps == null) return ['—', ''];
@@ -202,6 +221,23 @@ export function ringSvg(pct, elapsed) {
 // ---------------------------------------------------------------- metrics (stat, gauge, chart widgets)
 export const shortCpu = (n) => (n || '').replace(/^(AMD|Intel\(R\))\s*/, '').split(' ').slice(0, 4).join(' ');
 export const gpuOf = (s) => s?.pc?.gpu;
+/** All GPUs, main one first (older agents only send pc.gpu). */
+export const gpusOf = (s) => (s?.pc?.gpus?.length ? s.pc.gpus : s?.pc?.gpu ? [s.pc.gpu] : []);
+export const shortGpu = (n) => (n || 'GPU').replace(/^(NVIDIA|AMD|Intel\(R\))\s+/i, '').replace(/\((TM|R)\)/gi, '').replace(/\s+/g, ' ').trim();
+/**
+ * The memory a GPU works with. A graphics card: its own VRAM. An integrated GPU has only a small carve-out and lives
+ * on shared system memory, so dedicated + shared is what counts (Task Manager's "GPU memory").
+ */
+export function gpuMem(g) {
+  if (!g) return null;
+  if (g.integrated && g.sharedTotal) {
+    return { label: 'GPU memory', used: (g.vramUsed || 0) + (g.sharedUsed || 0), total: (g.vramTotal || 0) + g.sharedTotal };
+  }
+  return g.vramTotal ? { label: 'VRAM', used: g.vramUsed || 0, total: g.vramTotal } : null;
+}
+const memText = (m) => `${r1(m.used)} / ${Math.round(m.total)} GB`;
+/** Board power: watts when a sensor gives them, otherwise the share of the power limit Windows reports. */
+export const gpuPower = (g) => (g?.power != null ? `${Math.round(g.power)} W` : g?.powerPct != null ? `${Math.round(g.powerPct)}% power` : null);
 export const netMax = () => Math.max(1, ...hist.down, ...hist.up) * 1.15;
 
 export const METRICS = {
@@ -211,37 +247,59 @@ export const METRICS = {
     sub: (s) => {
       const g = gpuOf(s);
       if (!g) return 'No GPU data';
-      if (g.temp != null && g.power != null) return `${Math.round(g.temp)}°C · ${Math.round(g.power)} W`;
-      if (g.vramUsed != null && g.vramTotal != null) return `${r1(g.vramUsed)} / ${Math.round(g.vramTotal)} GB memory`; // no sensors (Apple GPU)
-      return g.name || 'Active';
+      const parts = [g.temp != null ? `${Math.round(g.temp)}°C` : null, gpuPower(g)].filter(Boolean);
+      if (parts.length) return parts.join(' · ');
+      const mem = gpuMem(g);
+      if (mem) return `${memText(mem)} memory`; // no sensors (Apple GPU)
+      return shortGpu(g.name) || 'Active';
     }, title: (s) => gpuOf(s)?.name },
   ram: { label: 'RAM', name: 'Memory', color: '--ram', unit: 'GB', max: (s) => s.pc?.ramTotalGb || 1, val: (s) => s.pc?.ramUsedGb, fmt: r1,
     pct: (s) => (s.pc ? (s.pc.ramUsedGb / s.pc.ramTotalGb) * 100 : null), sub: (s) => (s.pc && s.pc.ramTotalGb ? `${r1(s.pc.ramUsedGb)} / ${Math.round(s.pc.ramTotalGb)} GB` : '') },
   vram: { label: 'VRAM', name: 'Video memory', color: '--gpu', unit: '%', max: () => 100,
-    val: (s) => (gpuOf(s)?.vramTotal ? (gpuOf(s).vramUsed / gpuOf(s).vramTotal) * 100 : null),
-    sub: (s) => (gpuOf(s)?.vramTotal ? `${r1(gpuOf(s).vramUsed)} / ${Math.round(gpuOf(s).vramTotal)} GB` : '') },
+    val: (s) => { const m = gpuMem(gpuOf(s)); return m ? (m.used / m.total) * 100 : null; },
+    sub: (s) => { const m = gpuMem(gpuOf(s)); return m ? memText(m) : 'No GPU data'; } },
   net: { label: 'NETWORK', name: 'Network', color: '--net', rate: true, hist: 'down', max: netMax, val: (s) => s.pc?.netDownBps,
     sub: (s) => '↑ ' + rateStr(s.pc?.netUpBps) + (s.ping?.ms != null ? ` · ${Math.round(s.ping.ms)} ms` : '') },
   down: { label: 'DOWNLOAD', name: 'Download', color: '--net', rate: true, max: netMax, val: (s) => s.pc?.netDownBps },
   up: { label: 'UPLOAD', name: 'Upload', color: '--up', rate: true, max: netMax, val: (s) => s.pc?.netUpBps },
   ping: { label: 'PING', name: 'Ping', color: '#38bdf8', unit: 'ms', max: () => Math.max(50, ...hist.ping) * 1.2, val: (s) => s.ping?.ms,
     sub: (s) => (s.ping ? `avg ${s.ping.avgMs ?? '—'} ms · loss ${s.ping.lossPct}%` : '') },
-  gputemp: { label: 'GPU TEMP', name: 'GPU temperature', color: '#f97316', unit: '°C', max: () => 100, val: (s) => gpuOf(s)?.temp,
+  gputemp: { label: 'GPU TEMP', name: 'GPU temperature', color: '#f97316', unit: '°C', max: () => 100, hot: [75, 85], val: (s) => gpuOf(s)?.temp,
     sub: (s) => {
       const g = gpuOf(s);
       if (!g) return 'No GPU data';
-      const detail = [g.fan != null ? `Fan ${Math.round(g.fan)}%` : null, g.clock != null ? `${Math.round(g.clock)} MHz` : null].filter(Boolean);
+      const detail = [g.hotSpot != null ? `Hot spot ${Math.round(g.hotSpot)}°` : null,
+        g.fan != null ? `Fan ${Math.round(g.fan)}%` : g.fanRpm != null ? `Fan ${Math.round(g.fanRpm)} rpm` : null,
+        g.clock != null ? `${Math.round(g.clock)} MHz` : null].filter(Boolean);
       return detail.length ? detail.join(' · ') : (g.temp != null ? 'Temperature' : 'No GPU data');
     } },
-  cputemp: { label: 'CPU TEMP', name: 'CPU temperature', color: '#fb7185', unit: '°C', max: () => 100, val: (s) => s.pc?.cpuTemp,
+  hotspot: { label: 'HOT SPOT', name: 'GPU hot spot', color: '#ef4444', unit: '°C', max: () => 110, hot: [90, 100], val: (s) => gpuOf(s)?.hotSpot,
+    sub: (s) => {
+      const g = gpuOf(s);
+      if (g?.hotSpot == null) return 'needs LibreHardwareMonitor';
+      return [g.temp != null ? `Edge ${Math.round(g.temp)}°` : null, g.memTemp != null ? `Memory ${Math.round(g.memTemp)}°` : null].filter(Boolean).join(' · ');
+    } },
+  gpupower: { label: 'GPU POWER', name: 'GPU power', color: '#facc15', unit: (s) => (gpuOf(s)?.power != null ? 'W' : '%'),
+    max: (s) => { const g = gpuOf(s); return g?.power != null ? Math.max(g.powerLimit || 0, ...hist.gpupower, 50) : 100; },
+    val: (s) => { const g = gpuOf(s); return g?.power ?? g?.powerPct; },
+    sub: (s) => {
+      const g = gpuOf(s);
+      if (!g || (g.power == null && g.powerPct == null)) return 'No power data';
+      if (g.power != null && g.powerLimit) return `of ${Math.round(g.powerLimit)} W limit`;
+      return g.power != null ? shortGpu(g.name) : 'of the power limit';
+    } },
+  gpuclock: { label: 'GPU CLOCK', name: 'GPU clock', color: '#a78bfa', unit: 'MHz', max: () => Math.max(1000, ...hist.gpuclock) * 1.1, val: (s) => gpuOf(s)?.clock,
+    sub: (s) => { const g = gpuOf(s); return g?.memClock != null ? `Memory ${Math.round(g.memClock)} MHz` : g?.clock == null ? 'No clock data' : ''; } },
+  cputemp: { label: 'CPU TEMP', name: 'CPU temperature', color: '#fb7185', unit: '°C', max: () => 100, hot: [75, 85], val: (s) => s.pc?.cpuTemp,
     sub: (s) => (s.pc?.cpuTemp == null ? 'needs LibreHardwareMonitor' : shortCpu(s.pc?.cpuName)) },
 };
 
 export function metricText(m, s) {
   const v = m.val(s);
   if (m.rate) return fmtRate(v);
-  if (v == null) return ['—', m.unit || ''];
-  return [m.fmt ? m.fmt(v) : String(Math.round(v)), m.unit || ''];
+  const unit = (typeof m.unit === 'function' ? m.unit(s) : m.unit) || '';
+  if (v == null) return ['—', unit];
+  return [m.fmt ? m.fmt(v) : String(Math.round(v)), unit];
 }
 
 // ---------------------------------------------------------------- weather (Open-Meteo, straight from the phone)
@@ -270,7 +328,7 @@ export async function loadWeather(force = false) {
       '&timezone=auto&forecast_days=7';
     const ctl = new AbortController();
     setTimeout(() => ctl.abort(), 8000);
-    const data = await (await fetch(url, { signal: ctl.signal })).json();
+    const data = await (await safeFetch(url, { signal: ctl.signal })).json();
     store.set('wx', { key, at: Date.now(), data });
     D.weather = data;
     emit('weather');
@@ -360,6 +418,11 @@ export function keyButton(s) {
 export let media = null;          // last media state + the time it was received
 export let volDragging = false;
 export const setVolDragging = (v) => { volDragging = v; };
+export const setMediaState = (m) => {
+  if (D.state) D.state.media = m || null;
+  media = m ? { ...m, at: performance.now() } : null;
+  emit('state');
+};
 // The background glow: the accent colour (Settings › Display), or the album art's colour while music plays.
 export let DEFAULT_AMBIENT = '45, 212, 191';
 export let artTint = true;
@@ -418,7 +481,7 @@ export const Q_STYLE = { antigravity: { color: '#38bdf8', logo: '✦' }, claude:
 export function fmtReset(ts) {
   if (!ts) return '';
   const d = new Date(ts);
-  const hm = d.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
+  const hm = fmtHM(d);
   const day = d.toDateString() === new Date().toDateString() ? hm : d.toLocaleDateString(LOCALE, { weekday: 'short' }) + ' ' + hm;
   return `${day} · in ${fmtDur(ts - Date.now())}`;
 }
@@ -484,14 +547,33 @@ export function monogramColor(name) {
   return `hsl(${x} 70% 65%)`;
 }
 
+const ICON_CACHE = new Map();
+const MAX_ICON_CACHE = 200;
+
 /** Fills an icon box with the app icon, falling back to a coloured monogram. */
 export function fillIcon(box, g) {
   box.replaceChildren();
+  const cached = ICON_CACHE.get(g.name);
+  if (cached) {
+    box.textContent = '';
+    box.style.background = 'transparent';
+    box.appendChild(cached.cloneNode(true));
+    return;
+  }
   box.style.background = monogramColor(g.name);
   box.textContent = (g.title || g.name).charAt(0).toUpperCase();
   if (g.hasIcon !== false) {
     const img = new Image();
-    img.onload = () => { box.textContent = ''; box.style.background = 'transparent'; box.appendChild(img); };
+    img.onload = () => {
+      if (ICON_CACHE.size >= MAX_ICON_CACHE) {
+        const oldest = ICON_CACHE.keys().next().value;
+        if (oldest !== undefined) ICON_CACHE.delete(oldest);
+      }
+      ICON_CACHE.set(g.name, img);
+      box.textContent = '';
+      box.style.background = 'transparent';
+      box.appendChild(img);
+    };
     img.src = `${API}/procs/icon?name=${encodeURIComponent(g.name)}`;
   }
 }
@@ -720,7 +802,7 @@ export function handleEvent(e) {
   else if (e.kind === 'reload') location.reload();
 }
 
-export const WIDGET_ICONS = { rules: '⚡', chargecare: '🔋', nextup: '⏭️', moon: '🌙', wordclock: '🔤', clock: '🕒', weather: '⛅', forecast: '🌦️', media: '🎵', stat: '📈', gauge: '⏲️', chart: '📊', meters: '💾', quotas: '✳️', sessions: '🤖',
+export const WIDGET_ICONS = { rules: '⚡', chargecare: '🔋', nextup: '⏭️', moon: '🌙', wordclock: '🔤', clock: '🕒', weather: '⛅', forecast: '🌦️', media: '🎵', stat: '📈', gauge: '⏲️', chart: '📊', meters: '💾', gpu: '🎮', quotas: '✳️', sessions: '🤖',
   github: '🐙', processes: '⚙️', shortcuts: '🎛️', button: '🔘', worldclock: '🌍', calendar: '📅', pomodoro: '🍅', countdown: '⏳', note: '📝', command: '💻',
   push: '📡', inbox: '📬', label: '🔤', analog: '🕰️', progress: '📆', stopwatch: '⏱️', timer: '⏲️', counter: '🔢', breathe: '🫁', quote: '💬',
   checklist: '✅', battery: '🔋', topprocs: '🔥', quotaring: '🎯', volume: '🔊', sun: '🌅', air: '🍃', hackernews: '📰', exchange: '💱', crypto: '🪙', image: '🖼️' };
@@ -751,7 +833,7 @@ export function buildLayout() {
   const enabled = (cfg.pages || []).filter((p) => p.enabled !== false && Array.isArray(p.widgets));
   const next = enabled.length ? enabled : FALLBACK_PAGES;
   const portrait = isPortrait();
-  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, cfg.display?.appearance, portrait]);
+  const key = JSON.stringify([next, cfg.shortcuts, cfg.display?.showSeconds, cfg.display?.hour12, cfg.display?.appearance, portrait]);
   if (key === layoutKey) return;
   layoutKey = key;
   const prevId = pages[curPage]?.id;
@@ -847,6 +929,32 @@ export function gotoPageRef(ref) {
   lastTouch = Date.now();
   goPage(n, Math.abs(n - curPage) > 1);
   return n;
+}
+
+let procsSort = 'cpu';
+let procsSorter = null;
+
+export function registerProcessesSorter(fn) {
+  procsSorter = typeof fn === 'function' ? fn : null;
+  if (procsSorter) procsSorter(procsSort);
+}
+
+export function currentProcessesSort() {
+  return procsSort;
+}
+
+export function hasProcessesPage() {
+  return resolvePage('procs') >= 0 || resolvePage('processes') >= 0
+    || pages.some((p) => (p.widgets || []).some((w) => w.type === 'processes'));
+}
+
+export function gotoProcesses(sortTarget = 'cpu') {
+  procsSort = sortTarget === 'mem' ? 'mem' : 'cpu';
+  let idx = resolvePage('procs');
+  if (idx < 0) idx = resolvePage('processes');
+  if (idx < 0) idx = pages.findIndex((p) => (p.widgets || []).some((w) => w.type === 'processes'));
+  if (idx >= 0) gotoPageRef(idx + 1);
+  if (procsSorter) procsSorter(procsSort);
 }
 
 export const resolvePage = (ref) => {
@@ -1046,7 +1154,7 @@ export function renderRulesBtn() {
   const paused = rulesPaused && rulesPaused > Date.now();
   b.hidden = PREVIEW || !online;
   b.classList.toggle('on', !!paused);
-  b.textContent = paused ? `⏸ Rules paused until ${new Date(rulesPaused).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })} · resume` : '⏸ Pause rules 1 h';
+  b.textContent = paused ? `⏸ Rules paused until ${fmtHM(new Date(rulesPaused))} · resume` : '⏸ Pause rules 1 h';
 }
 
 export let titleTimer = 0;
@@ -1131,8 +1239,8 @@ let swipeTracking = false;
 pager.addEventListener('touchstart', (e) => {
   swipeTracking = false;
   if (e.touches.length !== 1 || pages.length < 2) return;
-  // Dragging a slider, the volume bar or a list must never flip the page.
-  if (volDragging || e.target.closest?.('button, input, textarea, select, a, [contenteditable], .s-list, .vb')) return;
+  // Dragging a slider, the volume bar, a list or the station carousel must never flip (or wrap) the page.
+  if (volDragging || e.target.closest?.('button, input, textarea, select, a, [contenteditable], .s-list, .vb, .radio-carousel-track')) return;
   swipeStartX = e.touches[0].clientX;
   swipeStartY = e.touches[0].clientY;
   swipeStartPage = curPage;
@@ -1246,7 +1354,7 @@ window.onAndroidSensor = (kind, value) => {
 
 export function tick() {
   const now = new Date();
-  $('nClock').textContent = pad(now.getHours()) + ':' + pad(now.getMinutes());
+  $('nClock').textContent = fmtHM(now);
   $('nDate').textContent = now.toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long' });
   if (darkSince && Date.now() - darkSince > 30_000) darkRoom = true;
   const dark = darkRoom && cfg.display?.nightWhenDark === true;
@@ -1361,12 +1469,16 @@ export function applyState(s) {
       pushHist('cpu', pc.cpu);
       pushHist('gpu', pc.gpu?.util);
       pushHist('ram', pc.ramUsedGb);
-      pushHist('vram', pc.gpu?.vramTotal ? (pc.gpu.vramUsed / pc.gpu.vramTotal) * 100 : 0);
+      const mem = gpuMem(pc.gpu);
+      pushHist('vram', mem ? (mem.used / mem.total) * 100 : 0);
       pushHist('down', pc.netDownBps);
       pushHist('up', pc.netUpBps);
       pushHist('ping', s.ping?.ms);
       pushHist('gputemp', pc.gpu?.temp);
       pushHist('cputemp', pc.cpuTemp);
+      pushHist('hotspot', pc.gpu?.hotSpot);
+      pushHist('gpupower', pc.gpu?.power ?? pc.gpu?.powerPct);
+      pushHist('gpuclock', pc.gpu?.clock);
     }
   }
   emit('state');

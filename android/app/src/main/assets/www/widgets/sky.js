@@ -1,4 +1,4 @@
-import { $, D, DEFAULT_CFG, LOCALE, cfg, fmtDur, h, tick } from '../main.js';
+import { $, D, DEFAULT_CFG, LOCALE, cfg, fmtDur, fmtHM, h, tick } from '../main.js';
 import { W } from '../registry.js';
 import { cached, every } from './helpers.js';
 
@@ -36,7 +36,7 @@ W.sun = {
         const pt = fg.getPointAtLength(len * f);
         sun.setAttribute('cx', pt.x.toFixed(1)); sun.setAttribute('cy', pt.y.toFixed(1));
         box.classList.toggle('night', now < rise || now > set);
-        const hm = (t) => t.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' });
+        const hm = fmtHM;
         q('.sr').textContent = '↑ ' + hm(rise);
         q('.ss').textContent = hm(set) + ' ↓';
         q('.sl').textContent = now < rise ? `rises in ${fmtDur(rise - now)}` : now > set ? 'after sunset' : `${fmtDur(set - now)} of light left`;

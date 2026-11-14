@@ -128,3 +128,120 @@ for(const viewport of [{width:780,height:360},{width:360,height:780}]){
     await page.screenshot({path:'../../.temp_files/control-audio-'+viewport.width+'.png'});
   });
 }
+
+test('radio cards ignore overlapping taps while a station toggle command is in flight', async ({ page }) => {
+  await page.goto('/panel/');
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('pb-demo-config', JSON.stringify({
+      night: { enabled: false },
+      shortcuts: [],
+      controls: {
+        actions: [
+          { id: 'r1', label: 'Jazz FM', kind: 'radio', target: 'https://example.com/jazz.mp3' },
+          { id: 'r2', label: 'Rock FM', kind: 'radio', target: 'https://example.com/rock.mp3' },
+        ],
+      },
+      pages: [{ id: 'controls', title: 'Controls', widgets: [{ id: 'radio-w', type: 'radio', x: 0, y: 0, w: 12, h: 6, options: { view: 'grid' } }] }],
+    }));
+  });
+  await page.reload();
+  const jazz = page.getByRole('button', { name: /Jazz FM/ });
+  const rock = page.getByRole('button', { name: /Rock FM/ });
+  await expect(jazz).toBeVisible();
+  await expect(rock).toBeVisible();
+
+  await page.evaluate(() => {
+    const orig = window.fetch.bind(window);
+    window.__radioCmds = [];
+    window.__gateNextCmd = true;
+    let release;
+    window.__releaseCmd = () => release && release();
+    const gate = new Promise(r => { release = r; });
+    window.fetch = async (url, init) => {
+      if (String(url).includes('/controls/command/action')) {
+        window.__radioCmds.push(new URL(url, location.href).searchParams.get('id'));
+        if (window.__gateNextCmd) {
+          window.__gateNextCmd = false;
+          await gate;
+        }
+      }
+      return orig(url, init);
+    };
+  });
+
+  await jazz.click();
+  await expect.poll(() => page.evaluate(() => window.__radioCmds)).toEqual(['r1']);
+  await expect(jazz).toHaveAttribute('aria-pressed', 'true');
+
+  // Tapping another station while Jazz FM's command is still in flight must not send a second POST
+  await rock.click();
+  await page.waitForTimeout(80);
+  expect(await page.evaluate(() => window.__radioCmds)).toEqual(['r1']);
+
+  await page.evaluate(() => window.__releaseCmd());
+  await expect(jazz).toHaveAttribute('aria-pressed', 'true');
+
+  // Once the first command settles, tapping Rock FM switches playback normally
+  await rock.click();
+  await expect.poll(() => page.evaluate(() => window.__radioCmds)).toEqual(['r1', 'r2']);
+  await expect(rock).toHaveAttribute('aria-pressed', 'true');
+  await expect(jazz).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('deckCommand discards an in-flight deckState request so stale data is not reused', async ({ page }) => {
+  await show(page, 'audio-mixer');
+  await expect(page.getByRole('slider', { name: 'Spotify volume', exact: true })).toBeVisible();
+  const result = await page.evaluate(async () => {
+    const mod = await import('/panel/widgets/controls.js');
+    const originalFetch = window.fetch;
+    let releaseFirstState;
+    const firstStateGate = new Promise(resolve => { releaseFirstState = resolve; });
+    let stateCalls = 0;
+
+    window.fetch = async (url, init) => {
+      if (String(url).includes('/controls/state')) {
+        stateCalls++;
+        if (stateCalls === 1) {
+          await firstStateGate;
+          return new Response(JSON.stringify({ audio: { sessions: [{ id: 'spotify', volume: 11 }] } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ audio: { sessions: [{ id: 'spotify', volume: 42 }] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (String(url).includes('/controls/command/')) {
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return originalFetch(url, init);
+    };
+
+    try {
+      mod.invalidateDeckState();
+      const firstInFlight = mod.deckState();
+      await mod.deckCommand('session', { id: 'spotify', volume: 42 });
+      const freshAfterCommand = await mod.deckState();
+      releaseFirstState();
+      await firstInFlight;
+      const afterStaleResolves = await mod.deckState();
+      return {
+        stateCalls,
+        freshVolume: freshAfterCommand.audio.sessions[0].volume,
+        cachedVolume: afterStaleResolves.audio.sessions[0].volume,
+      };
+    } finally {
+      window.fetch = originalFetch;
+    }
+  });
+
+  expect(result.stateCalls).toBe(2);
+  expect(result.freshVolume).toBe(42);
+  expect(result.cachedVolume).toBe(42);
+});
