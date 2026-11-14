@@ -787,6 +787,7 @@ function widgetSummary(w) {
     case 'quotaring': return `${choice('provider')} · ${choice('limit').split(' (')[0]}`;
     case 'analog': return o.label || o.zone || '';
     case 'topprocs': case 'breathe': return choice(w.type === 'topprocs' ? 'sort' : 'pattern');
+    case 'gpu': return choice('adapter');
     case 'timer': case 'counter': return o.label || '';
     case 'checklist': return `${o.title || 'Today'} · ${(o.items || d.options[1].default).length} items`;
     case 'exchange': return `${o.base || 'EUR'} → ${(o.symbols || d.options[1].default).join(', ')}`;

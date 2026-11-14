@@ -7,22 +7,33 @@ using System.Text.RegularExpressions;
 
 namespace PhoneBox.Agent;
 
+/// <summary>
+/// One GPU. Units: load and fan duty in %, temperatures in °C, power in W, memory in GB, clocks in MHz.
+/// PowerPct is the board power as a share of its limit (all Windows reports for cards without a vendor tool);
+/// Shared* is system memory the GPU uses (what an integrated GPU mostly lives on).
+/// </summary>
 public sealed record GpuInfo(string Name, double? Util, double? Temp, double? Power, double? PowerLimit,
-    double? VramUsed, double? VramTotal, double? Fan, double? Clock);
+    double? VramUsed, double? VramTotal, double? Fan, double? Clock,
+    string? Vendor = null, string? Source = null, bool Integrated = false,
+    double? HotSpot = null, double? MemTemp = null, double? MemClock = null,
+    double? SharedUsed = null, double? SharedTotal = null, double? PowerPct = null, double? FanRpm = null,
+    double? TempMax = null, string? Driver = null);
 
 public sealed record DiskInfo(string Name, double UsedGb, double TotalGb);
 
 public sealed record PcSnapshot(double? Cpu, double? CpuTemp, string CpuName, double RamUsedGb, double RamTotalGb,
-    GpuInfo? Gpu, double NetDownBps, double NetUpBps, IReadOnlyList<DiskInfo> Disks, long UptimeSec);
+    GpuInfo? Gpu, double NetDownBps, double NetUpBps, IReadOnlyList<DiskInfo> Disks, long UptimeSec,
+    IReadOnlyList<GpuInfo>? Gpus = null);
 
-/// <summary>Samples CPU, RAM, network, disk and NVIDIA GPU metrics once a second.</summary>
+/// <summary>Samples CPU, RAM, network, disk and GPU metrics once a second.</summary>
 public sealed class SystemMonitor(ILogger<SystemMonitor> log) : BackgroundService
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMilliseconds(600) };
     private readonly string _cpuName = ReadCpuName();
 
     private volatile PcSnapshot? _snap;
-    private volatile GpuInfo? _gpu;
+    // GPU sources, highest priority first: nvidia-smi, LibreHardwareMonitor, the OS (D3DKMT + counters / sysfs / ioreg)
+    private volatile IReadOnlyList<GpuInfo>? _nvidia, _lhmGpus, _osGpus;
     private double? _cpuTemp;
     private IReadOnlyList<DiskInfo> _disks = [];
 
@@ -58,6 +69,7 @@ public sealed class SystemMonitor(ILogger<SystemMonitor> log) : BackgroundServic
 
             var (memUsed, memTotal) = Memory();
             const double Gb = 1024d * 1024 * 1024;
+            var gpus = Gpus.Compose(_nvidia, _lhmGpus, _osGpus);
 
             _snap = new PcSnapshot(
                 Cpu: cpu is { } c ? Math.Round(c, 1) : null,
@@ -65,42 +77,77 @@ public sealed class SystemMonitor(ILogger<SystemMonitor> log) : BackgroundServic
                 CpuName: _cpuName,
                 RamUsedGb: Math.Round(memUsed / Gb, 1),
                 RamTotalGb: Math.Round(memTotal / Gb, 1),
-                Gpu: _gpu,
+                Gpu: gpus.FirstOrDefault(),
                 NetDownBps: Math.Round(down),
                 NetUpBps: Math.Round(up),
                 Disks: _disks,
-                UptimeSec: Environment.TickCount64 / 1000);
+                UptimeSec: Environment.TickCount64 / 1000,
+                Gpus: gpus);
         }
     }
 
-    // Keeps nvidia-smi running and reads one line per second (macOS: asks ioreg every two seconds instead).
-    private async Task GpuLoop(CancellationToken ct)
+    private Task GpuLoop(CancellationToken ct)
     {
-        if (OperatingSystem.IsMacOS()) { await AppleGpuLoop(ct); return; }
-        var name = "GPU";
+        if (OperatingSystem.IsMacOS()) return AppleGpuLoop(ct);
+        _ = Task.Run(() => OsGpuLoop(ct), ct);
+        return NvidiaLoop(ct);
+    }
+
+    // Keeps nvidia-smi running and reads one line per GPU per second.
+    private async Task NvidiaLoop(CancellationToken ct)
+    {
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                name = (await RunAsync("nvidia-smi", "--query-gpu=name --format=csv,noheader", ct)).Trim().Split('\n')[0].Trim();
+                var names = Gpus.ParseNvidiaNames(await RunAsync("nvidia-smi", "--query-gpu=index,name,driver_version --format=csv,noheader", ct));
                 var psi = new ProcessStartInfo("nvidia-smi",
-                    "--query-gpu=utilization.gpu,temperature.gpu,power.draw,power.limit,memory.used,memory.total,fan.speed,clocks.gr " +
+                    "--query-gpu=index,utilization.gpu,temperature.gpu,power.draw,power.limit,memory.used,memory.total,fan.speed,clocks.gr,clocks.mem " +
                     "--format=csv,noheader,nounits -lms 1000")
                 { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = AppPaths.NeutralCwd };
                 using var p = Process.Start(psi)!;
                 JobObject.Track(p);
                 using var reg = ct.Register(() => { try { p.Kill(); } catch { } });
+                var cards = new SortedDictionary<int, GpuInfo>();
                 while (await p.StandardOutput.ReadLineAsync(ct) is { } line)
                 {
-                    var f = line.Split(',').Select(s => double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : (double?)null).ToArray();
-                    if (f.Length < 8) continue;
-                    _gpu = new GpuInfo(name, f[0], f[1], f[2], f[3], f[4] / 1024, f[5] / 1024, f[6], f[7]);
+                    if (Gpus.ParseNvidiaLine(line, names) is not { } row) continue;
+                    cards[row.Index] = row.Gpu;
+                    _nvidia = cards.Values.ToList();
                 }
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) { log.LogDebug("nvidia-smi: {Msg}", ex.Message); }
-            _gpu = null;
+            _nvidia = null;
             await Task.Delay(TimeSpan.FromSeconds(10), ct);
+        }
+    }
+
+    // Every vendor's GPU through the OS: Windows' graphics kernel and GPU counters, Linux sysfs (amdgpu, i915/xe).
+    private async Task OsGpuLoop(CancellationToken ct)
+    {
+#if WINDOWS
+        using var win = new WindowsGpu();
+#endif
+        var failures = 0;
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+#if WINDOWS
+                _osGpus = win.Sample();
+#else
+                _osGpus = Gpus.ReadSysfs();
+#endif
+                failures = 0;
+            }
+            catch (Exception ex)
+            {
+                if (failures++ == 0) log.LogWarning("gpu: {Msg}", ex.Message);
+                _osGpus = null;
+            }
+            // nothing to read (no GPU driver, a VM): look again now and then
+            await Task.Delay(_osGpus is { Count: > 0 } ? TimeSpan.FromSeconds(2) : TimeSpan.FromSeconds(60), ct);
         }
     }
 
@@ -125,12 +172,12 @@ public sealed class SystemMonitor(ILogger<SystemMonitor> log) : BackgroundServic
                 {
                     var text = await p.StandardOutput.ReadToEndAsync(cts.Token);
                     await p.WaitForExitAsync(cts.Token);
-                    _gpu = ParseAppleGpu(text, Memory().Total);
+                    _osGpus = ParseAppleGpu(text, Memory().Total) is { } g ? [g] : null;
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { try { p.Kill(); } catch { } _gpu = null; }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { try { p.Kill(); } catch { } _osGpus = null; }
             }
             catch (OperationCanceledException) { return; }
-            catch (Exception ex) { log.LogDebug("apple-gpu: {Msg}", ex.Message); _gpu = null; }
+            catch (Exception ex) { log.LogDebug("apple-gpu: {Msg}", ex.Message); _osGpus = null; }
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         }
     }
@@ -146,13 +193,16 @@ public sealed class SystemMonitor(ILogger<SystemMonitor> log) : BackgroundServic
         return new GpuInfo(model.Success ? model.Groups[1].Value : "Apple GPU",
             double.Parse(util.Groups[1].Value, CultureInfo.InvariantCulture), null, null, null,
             alloc.Success ? Math.Round(double.Parse(alloc.Groups[1].Value, CultureInfo.InvariantCulture) / Gb, 1) : null,
-            totalMemoryBytes > 0 ? Math.Round(totalMemoryBytes / Gb, 1) : null, null, null);
+            totalMemoryBytes > 0 ? Math.Round(totalMemoryBytes / Gb, 1) : null, null, null,
+            Vendor: "apple", Source: "ioreg", Integrated: true);
     }
 
     // CPU temperature: Windows from LibreHardwareMonitor's web server (port 8085), when it is running; Linux from hwmon.
+    // The same LibreHardwareMonitor answer carries the GPU sensors too (hot spot, board power, fan, clocks).
     private async Task CpuTempLoop(CancellationToken ct)
     {
 #if !WINDOWS
+        _lhmGpus = null; // LibreHardwareMonitor is Windows only
         while (!ct.IsCancellationRequested)
         {
             _cpuTemp = UnixSystem.CpuTemp();
@@ -169,11 +219,18 @@ public sealed class SystemMonitor(ILogger<SystemMonitor> log) : BackgroundServic
             {
                 using var doc = JsonDocument.Parse(await _http.GetStringAsync("http://127.0.0.1:8085/data.json", ct));
                 _cpuTemp = FindTemp(doc.RootElement, names);
+                try { _lhmGpus = Gpus.ParseLhm(doc.RootElement); }
+                catch (Exception ex)
+                {
+                    log.LogDebug("lhm gpu: {Msg}", ex.Message);
+                    _lhmGpus = null;
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             catch
             {
                 _cpuTemp = null;
+                _lhmGpus = null;
                 delay = TimeSpan.FromSeconds(30);
             }
             await Task.Delay(delay, ct);

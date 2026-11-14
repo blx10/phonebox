@@ -178,8 +178,17 @@
         ramUsedGb: wave(120, 21, 24), ramTotalGb: 64, netDownBps: Math.max(0, wave(23, 0.2e6, 9e6, 0, 1e6)), netUpBps: Math.max(0, wave(17, 40e3, 600e3, 1, 50e3)),
         uptimeSec: 3 * 86400 + 5 * 3600 + Math.floor((now() - START) / 1000),
         disks: [{ name: 'C:', usedGb: 612, totalGb: 1000 }, { name: 'D:', usedGb: 1450, totalGb: 2000 }, { name: 'E:', usedGb: 310, totalGb: 4000 }],
-        gpu: { name: 'NVIDIA GeForce RTX 4080', util: Math.max(0, wave(29, 4, 38, 2, 4)), temp: wave(50, 46, 61), power: wave(29, 38, 140, 2),
-          powerLimit: 320, clock: 2520, fan: 34, vramUsed: 5.8, vramTotal: 16 },
+        ...(() => {
+          const gpus = [
+            { name: 'NVIDIA GeForce RTX 4080', util: Math.max(0, wave(29, 4, 38, 2, 4)), temp: wave(50, 46, 61), power: wave(29, 38, 140, 2),
+              powerLimit: 320, clock: 2520, fan: 34, vramUsed: 5.8, vramTotal: 16, vendor: 'nvidia', source: 'nvidia-smi+windows', integrated: false,
+              memClock: 11201, sharedUsed: 0.3, sharedTotal: 31.9, powerPct: null, fanRpm: 1180, tempMax: 90, driver: '596.36', hotSpot: null, memTemp: null },
+            { name: 'AMD Radeon(TM) Graphics', util: Math.max(0, wave(41, 0, 6, 0, 1)), temp: wave(60, 50, 58), power: null, powerLimit: null,
+              vramUsed: 0.1, vramTotal: 0.5, fan: null, clock: null, vendor: 'amd', source: 'windows', integrated: true, memClock: 2400,
+              sharedUsed: 0.2, sharedTotal: 31.9, powerPct: wave(37, 6, 14), fanRpm: null, tempMax: null, driver: '32.0.21045.11001', hotSpot: null, memTemp: null },
+          ];
+          return { gpu: gpus[0], gpus };
+        })(),
       },
       media: { app: 'Spotify', title, artist, album, durMs: dur, posMs: position(), playing: player.playing, canSeek: true, artId: player.track + 1 },
       audio: { ...audio },

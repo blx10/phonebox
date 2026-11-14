@@ -7,6 +7,22 @@
   night screen, agenda, Next up, countdown, sunrise/sunset, quota resets and "rules paused until" (#31). Off by
   default.
 - World clocks with many zones in a narrow widget no longer run their times into each other.
+- GPU details widget: one graphics card in depth (load, VRAM or, for an integrated GPU, its shared memory, power,
+  temperature against the card's limit, core and memory clocks, fan, driver and where the data came from). It can show
+  the second GPU of a PC, typically the processor's integrated one.
+- New metrics for tiles, gauges and charts: GPU hot spot, GPU power and GPU clock; VRAM is now on tiles and charts, the
+  GPU and CPU temperatures on charts. The GPU tile shows the temperature and power of AMD and Intel cards too.
+- Memory & disks shows a bar for every GPU.
+
+**Agent**
+- AMD and Intel GPUs (#49). On Windows the agent reads every GPU the way Task Manager does, with no vendor tool: its
+  name, load, VRAM and shared memory, temperature, memory clock, power share and driver, through the graphics kernel
+  (D3DKMT) and the GPU performance counters. LibreHardwareMonitor's web server, when it runs, adds the hot spot,
+  memory temperature, board power, fan and clocks. On Linux, AMD cards come from `amdgpu` sysfs (load, VRAM, GTT,
+  temperatures, power, fan, clocks) and Intel ones show their clock. NVIDIA stays on `nvidia-smi`, which now also reports
+  every card in a multi-GPU PC, the memory clock and the driver version.
+- The state carries `pc.gpus`, all GPUs with the main one first (a graphics card before an integrated GPU);
+  `pc.gpu` stays the main GPU, so older panels keep working.
 
 ## 0.9.4 — 2026-11-11
 

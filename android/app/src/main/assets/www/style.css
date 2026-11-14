@@ -975,3 +975,15 @@ body.night #night { display: flex; }
 .q-rings-grid .q-reset { font-size: 10px; color: var(--dim); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .q-rings-grid .q-pace { display: none; }
 .q-grid { position: relative; }
+
+/* ---------- GPU details ---------- */
+.w-gpu { padding: 9px 12px 10px; display: flex; flex-direction: column; }
+.gd-big { display: flex; align-items: baseline; gap: 3px; margin-top: 1px; min-width: 0; }
+.gd-big b { font-size: clamp(18px, 15cqh, 34px); font-weight: 500; letter-spacing: -0.02em; }
+.gd-big small { font-size: 12.5px; color: var(--muted); }
+.gd-big .empty { height: auto; padding: 18px 0; }
+.gd-temp { margin-left: auto; font-size: 12px; color: #fdba74; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gd-rows { margin-top: 6px; }
+.gd-chips { margin: 8px 0 0; justify-content: flex-start; max-height: 48px; }
+@container (max-height: 190px) { .w-gpu .gd-chips { display: none; } }
+@container (max-height: 120px) { .w-gpu .gd-rows .meter:nth-child(n+2) { display: none; } }

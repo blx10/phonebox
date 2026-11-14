@@ -1,4 +1,4 @@
-import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtClock, fmtDur, fmtHM, fmtMem, fmtReset, fmtTime, fmtValue, h, hour12, haptic, hist, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, ringSvg, setArtColor, setVolDragging, shortDur, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
+import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtClock, fmtDur, fmtHM, fmtMem, fmtReset, fmtTime, fmtValue, gpuMem, gpusOf, h, hour12, haptic, hist, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, shortGpu, ringSvg, setArtColor, setVolDragging, shortDur, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
 import { W } from '../registry.js';
 
 // ================================================================= widgets
@@ -214,7 +214,7 @@ W.gauge = {
         if (!s) return;
         const raw = m.pct ? m.pct(s) : m.val(s);
         const p = raw == null ? 0 : (raw / (m.pct ? 100 : m.max(s))) * 100;
-        const warn = (o.metric || 'cpu').includes('temp') ? (raw > 85 ? '#ef4444' : raw > 75 ? '#f59e0b' : '') : (p >= 95 ? '#ef4444' : p >= 85 ? '#f59e0b' : '');
+        const warn = m.hot ? (raw > m.hot[1] ? '#ef4444' : raw > m.hot[0] ? '#f59e0b' : '') : (p >= 95 ? '#ef4444' : p >= 85 ? '#f59e0b' : '');
         dial.style.setProperty('--qc', warn || 'var(--q)');
         if (svg) svg.remove();
         dial.insertAdjacentHTML('afterbegin', ringSvg(p));
@@ -283,8 +283,13 @@ W.meters = {
         const s = pc.uptimeSec, d = Math.floor(s / 86400), hr = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
         up.textContent = 'Up ' + (d ? `${d} d ${hr} h` : hr ? `${hr} h ${m} min` : `${m} min`);
         const rows = [meter('RAM', `${r1(pc.ramUsedGb)} / ${Math.round(pc.ramTotalGb)} GB`, (pc.ramUsedGb / pc.ramTotalGb) * 100)];
-        const g = pc.gpu;
-        if (g && g.vramTotal) rows.push(meter('VRAM', `${r1(g.vramUsed)} / ${Math.round(g.vramTotal)} GB`, (g.vramUsed / g.vramTotal) * 100, cssVar('--gpu')));
+        // one row per GPU (the integrated one counts its shared memory); named once there is more than one
+        const gpus = gpusOf(D.state);
+        for (const g of gpus) {
+          const m = gpuMem(g);
+          if (m) rows.push(meter(gpus.length > 1 ? `${m.label === 'VRAM' ? 'VRAM' : 'GPU'} · ${shortGpu(g.name)}` : m.label === 'VRAM' ? 'VRAM' : 'GPU MEMORY',
+            `${r1(m.used)} / ${Math.round(m.total)} GB`, (m.used / m.total) * 100, cssVar('--gpu')));
+        }
         const disks = h('div', 'disks', ...(pc.disks || []).map((dk) => meter(dk.name === '/' ? 'DISK' : dk.name, Math.round((dk.usedGb / dk.totalGb) * 100) + '%', (dk.usedGb / dk.totalGb) * 100, '#94a3b8')));
         list.replaceChildren(...rows, disks);
       },

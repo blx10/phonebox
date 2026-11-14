@@ -1,4 +1,4 @@
-import { $, API, D, PANEL_HEADERS, LOCALE, Q_STYLE, api, bridge, cfg, color, rulesPaused, toggleRulesPause, fillIcon, fmtDur, fmtHM, fmtMem, gotoPageRef, h, haptic, openSheet, paceInfo, pad, quotaProviders, store, tick, toast } from '../main.js';
+import { $, API, D, PANEL_HEADERS, LOCALE, Q_STYLE, api, bridge, cfg, color, cssVar, rulesPaused, toggleRulesPause, fillIcon, fmtDur, fmtHM, fmtMem, gotoPageRef, gpuMem, gpusOf, h, haptic, openSheet, paceInfo, pad, quotaProviders, r1, shortGpu, store, tick, toast } from '../main.js';
 import { W } from '../registry.js';
 import { canKillAnywhere, dialEl, every } from './helpers.js';
 
@@ -564,6 +564,72 @@ W.nextup = {
         meta.textContent = [`${hm(ev.start)}–${hm(ev.end)}`, ev.location, cur && next ? `then ${next.title} at ${hm(next.start)}` : ''].filter(Boolean).join(' · ');
         if (cur) bar.style.width = Math.min(100, ((now - ev.start) / (ev.end - ev.start)) * 100) + '%';
         box.style.setProperty('--nu', ev.color || 'rgb(var(--ambient))');
+      },
+    };
+  },
+};
+
+// One GPU in detail: load, memory, temperatures, power, clocks and fan. NVIDIA comes from nvidia-smi; AMD and Intel
+// from Windows' own GPU counters (temperature, VRAM, load), richer with LibreHardwareMonitor (hot spot, watts, fan, clocks).
+const GPU_VENDOR = { nvidia: 'NVIDIA', amd: 'AMD', intel: 'Intel', apple: 'Apple', qualcomm: 'Qualcomm' };
+const GPU_SOURCE = { 'nvidia-smi': 'nvidia-smi', lhm: 'LibreHardwareMonitor', windows: 'Windows', sysfs: 'sysfs', ioreg: 'ioreg' };
+
+W.gpu = {
+  needs: ['state'],
+  create(box, { o }) {
+    const idx = Math.max(0, Math.min(3, Number(o.adapter) || 0));
+    box.style.setProperty('--c', cssVar('--gpu'));
+    const label = h('span', 's-label', 'GPU'), name = h('span', 's-name');
+    const big = h('div', 'gd-big'), rows = h('div', 'meters gd-rows'), chips = h('div', 'chips gd-chips');
+    box.append(h('div', 's-head', label, name), big, rows, chips);
+    const meter = (title, txt, pct, c) => {
+      const e = h('div', 'meter', h('div', 'm-row', h('span', null, title), h('span', null, txt)), h('div', 'track', h('i')));
+      e.querySelector('i').style.width = Math.max(0, Math.min(100, pct || 0)) + '%';
+      if (c) e.style.setProperty('--c', c);
+      return e;
+    };
+    const heat = (t, max) => (t >= max - 5 ? '#ef4444' : t >= max - 15 ? '#f59e0b' : '#f97316');
+    return {
+      update() {
+        const g = gpusOf(D.state)[idx];
+        if (!g) {
+          label.textContent = 'GPU';
+          name.textContent = '';
+          big.replaceChildren(h('div', 'empty', !D.state ? 'Waiting…' : idx ? 'No second GPU' : 'No GPU data'));
+          rows.replaceChildren();
+          chips.replaceChildren();
+          return;
+        }
+        label.textContent = (GPU_VENDOR[g.vendor] || 'GPU') + (g.integrated ? ' · iGPU' : '');
+        name.textContent = shortGpu(g.name);
+        name.title = g.name;
+
+        const temps = [g.temp != null ? `${Math.round(g.temp)}°C` : null, g.hotSpot != null ? `hot spot ${Math.round(g.hotSpot)}°` : null,
+          g.memTemp != null ? `memory ${Math.round(g.memTemp)}°` : null].filter(Boolean).join(' · ');
+        big.replaceChildren(h('b', null, g.util != null ? String(Math.round(g.util)) : '—'), h('small', null, '% load'), h('span', 'gd-temp', temps));
+
+        const list = [];
+        const mem = gpuMem(g);
+        if (mem) list.push(meter(mem.label === 'VRAM' ? 'VRAM' : 'GPU memory', `${r1(mem.used)} / ${Math.round(mem.total)} GB`, (mem.used / mem.total) * 100));
+        if (!g.integrated && g.sharedTotal && g.sharedUsed != null) list.push(meter('Shared memory', `${r1(g.sharedUsed)} GB`, (g.sharedUsed / g.sharedTotal) * 100, '#64748b'));
+        if (g.power != null) {
+          list.push(meter('Power', g.powerLimit ? `${Math.round(g.power)} / ${Math.round(g.powerLimit)} W` : `${Math.round(g.power)} W`,
+            g.powerLimit ? (g.power / g.powerLimit) * 100 : g.powerPct, '#facc15'));
+        } else if (g.powerPct != null) list.push(meter('Power', `${Math.round(g.powerPct)}% of limit`, g.powerPct, '#facc15'));
+        const hottest = Math.max(g.temp ?? -1, g.hotSpot ?? -1);
+        if (hottest >= 0) {
+          const max = g.tempMax || (g.hotSpot != null ? 110 : 100);
+          list.push(meter('Temperature', `${Math.round(hottest)} / ${Math.round(max)}°C`, (hottest / max) * 100, heat(hottest, max)));
+        }
+        rows.replaceChildren(...list);
+
+        chips.replaceChildren(...[
+          g.clock != null ? `Core ${Math.round(g.clock)} MHz` : null,
+          g.memClock != null ? `Memory ${Math.round(g.memClock)} MHz` : null,
+          g.fan != null || g.fanRpm != null ? `Fan ${[g.fan != null ? Math.round(g.fan) + '%' : null, g.fanRpm != null ? Math.round(g.fanRpm) + ' rpm' : null].filter(Boolean).join(' · ')}` : null,
+          g.driver ? `Driver ${g.driver}` : null,
+          g.source ? g.source.split('+').map((x) => GPU_SOURCE[x] || x).join(' + ') : null,
+        ].filter(Boolean).map((t) => h('span', 'chip', t)));
       },
     };
   },
