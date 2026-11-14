@@ -127,6 +127,82 @@ for (const hour12 of [false, true]) {
   });
 }
 
+test('clock times follow display.hour12 ("auto") via Android.is24Hour bridge and react to system changes', async ({ browser, baseURL }) => {
+  const ctx = await browser.newContext({ baseURL, viewport: { width: 780, height: 360 }, timezoneId: 'UTC' });
+  await ctx.addInitScript(() => {
+    window.__phoneboxKey = 'pb-key-test';
+    window.__phone24h = false;
+    window.Android = {
+      battery: () => '{}',
+      transport: () => 'usb',
+      version: () => 'test',
+      haptic() {},
+      buzz() {},
+      setBrightness() {},
+      setVolumeKeys() {},
+      is24Hour: (key) => (key === 'pb-key-test' ? window.__phone24h : true),
+    };
+  });
+  const page = await ctx.newPage();
+  await page.clock.setFixedTime(new Date('2026-11-12T14:05:00Z'));
+  await layout(page, [
+    { id: 'c', type: 'clock', x: 0, y: 0, w: 6, h: 3, options: { weather: false, status: false } },
+    { id: 'wc', type: 'worldclock', x: 6, y: 0, w: 6, h: 3, options: { zones: ['UTC=Etc/UTC', 'Tokyo=Asia/Tokyo'] } },
+    { id: 'cd', type: 'countdown', x: 0, y: 3, w: 6, h: 3, options: { target: '2026-12-24 09:30' } },
+  ], { display: { idleReturnSec: 0, hour12: 'auto' } });
+
+  await expect(page.locator('.clock .hh')).toHaveText('2');
+  await expect(page.locator('.clock .ap')).toHaveText('PM');
+  await expect(page.locator('.wc-t')).toHaveText(['2:05 PM', '11:05 PM']);
+  await expect(page.locator('.cd-s')).toContainText('9:30 AM');
+
+  await page.evaluate(() => {
+    window.__phone24h = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(page.locator('.clock .hh')).toHaveText('14');
+  await expect(page.locator('.clock .ap')).toHaveText('');
+  await expect(page.locator('.wc-t')).toHaveText(['14:05', '23:05']);
+  await expect(page.locator('.cd-s')).toContainText('09:30');
+
+  // Calls without a matching panel bridge key fail closed to 24-hour.
+  await page.evaluate(() => {
+    window.__phone24h = false;
+    window.__phoneboxKey = 'wrong-key';
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(page.locator('.clock .hh')).toHaveText('14');
+  await expect(page.locator('.clock .ap')).toHaveText('');
+  await ctx.close();
+});
+
+test('settings Display Time format select saves false, true and auto', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 860 });
+  await layout(page, [widget('clock')], { display: { idleReturnSec: 0, hour12: 'auto' } });
+  await page.goto('/settings/#general');
+  const sel = page.locator('[data-bind="display.hour12"]');
+  await expect(sel).toBeVisible();
+  await expect(sel).toHaveValue('auto');
+
+  await sel.selectOption('true');
+  await page.locator('#save').click();
+  await expect(page.locator('#save')).toBeDisabled();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pb-demo-config')).display.hour12)).toBe(true);
+
+  await sel.selectOption('false');
+  await page.locator('#save').click();
+  await expect(page.locator('#save')).toBeDisabled();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pb-demo-config')).display.hour12)).toBe(false);
+
+  await sel.selectOption('auto');
+  await page.locator('#save').click();
+  await expect(page.locator('#save')).toBeDisabled();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('pb-demo-config')).display.hour12)).toBe('auto');
+
+  await page.reload();
+  await expect(sel).toHaveValue('auto');
+});
+
 test('multi option preserves saved unlisted quota provider IDs when toggling choices', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 860 });
   await layout(page, [widget('quotas', { providers: ['claude', 'alibaba'] })]);

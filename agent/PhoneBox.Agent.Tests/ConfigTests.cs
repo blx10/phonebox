@@ -228,3 +228,41 @@ public class ConfigConcurrencyTests
         finally { File.Delete(path); File.Delete(path + ".bak"); }
     }
 }
+
+public class Hour12ConfigTests
+{
+    [Theory]
+    [InlineData("{}", "false", JsonValueKind.False)]
+    [InlineData("""{"display":{"hour12":false}}""", "false", JsonValueKind.False)]
+    [InlineData("""{"display":{"hour12":true}}""", "true", JsonValueKind.True)]
+    [InlineData("""{"display":{"hour12":"true"}}""", "true", JsonValueKind.True)]
+    [InlineData("""{"display":{"hour12":"12h"}}""", "true", JsonValueKind.True)]
+    [InlineData("""{"display":{"hour12":"false"}}""", "false", JsonValueKind.False)]
+    [InlineData("""{"display":{"hour12":"auto"}}""", "auto", JsonValueKind.String)]
+    [InlineData("""{"display":{"hour12":" AUTO "}}""", "auto", JsonValueKind.String)]
+    [InlineData("""{"display":{"hour12":"bogus"}}""", "false", JsonValueKind.False)]
+    [InlineData("""{"display":{"hour12":null}}""", "false", JsonValueKind.False)]
+    [InlineData("""{"display":{"hour12":123}}""", "false", JsonValueKind.False)]
+    [InlineData("""{"display":{"hour12":["bad"]}}""", "false", JsonValueKind.False)]
+    public void DisplayHour12NormalizesAndPreservesWireTypes(string inputJson, string expectedNormalized, JsonValueKind expectedWrittenKind)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"phonebox-h12-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, "{}");
+            var store = new ConfigStore(path);
+            Assert.Null(store.Save(inputJson));
+            Assert.Equal(expectedNormalized, store.Get().Display.Hour12);
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var prop = doc.RootElement.GetProperty("display").GetProperty("hour12");
+            Assert.Equal(expectedWrittenKind, prop.ValueKind);
+            if (expectedWrittenKind == JsonValueKind.String) Assert.Equal("auto", prop.GetString());
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(path + ".bak");
+        }
+    }
+}

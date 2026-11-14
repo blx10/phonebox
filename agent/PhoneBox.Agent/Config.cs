@@ -94,8 +94,9 @@ public sealed class DisplayConfig
 {
     public AppearanceConfig? Appearance { get; set; }
     public bool ShowSeconds { get; set; } = true;
-    /// <summary>Show clock times as "2:05 PM" instead of "14:05".</summary>
-    public bool Hour12 { get; set; }
+    /// <summary>false ("14:05", default), true ("2:05 PM") or "auto" (follow the phone).</summary>
+    [JsonConverter(typeof(Hour12JsonConverter))]
+    public string Hour12 { get; set; } = "false";
     /// <summary>Return to the first page after this many idle seconds; 0 = never.</summary>
     public int IdleReturnSec { get; set; } = 90;
     /// <summary>Vibrate when a session finishes or needs input.</summary>
@@ -422,6 +423,7 @@ public sealed partial class ConfigStore(string path)
         foreach (var profile in c.Controls.Profiles) { profile.Levels = (profile.Levels ?? []).Where(l => l is not null).Take(512).ToList(); profile.Defaults ??= []; profile.Actions = (profile.Actions ?? []).Where(a => !string.IsNullOrEmpty(a)).Take(64).ToList(); profile.Label ??= profile.Id; }
         c.Display ??= new();
         c.Display.Appearance?.Normalize();
+        c.Display.Hour12 = Hour12JsonConverter.Normalize(c.Display.Hour12);
         c.Display.IdleReturnSec = Math.Clamp(c.Display.IdleReturnSec, 0, 3600);
         c.Display.SwitchCountdownSec = Math.Clamp(c.Display.SwitchCountdownSec, 0, 30);
         c.Display.TouchGraceSec = Math.Clamp(c.Display.TouchGraceSec, 0, 600);
@@ -632,4 +634,31 @@ public sealed class CodexBarConfig
     public bool Rotate { get; set; } = true;
     public int PageSize { get; set; } = 2;
     public int RotateInterval { get; set; } = 8;
+}
+
+/// <summary>Reads/writes display.hour12 as boolean false/true or "auto" (follow the phone) so boolean configs stay wire-compatible.</summary>
+internal sealed class Hour12JsonConverter : JsonConverter<string>
+{
+    public static string Normalize(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "true" or "12h" => "true",
+        "auto" => "auto",
+        _ => "false",
+    };
+
+    public override string Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.True) return "true";
+        if (reader.TokenType == JsonTokenType.False) return "false";
+        if (reader.TokenType == JsonTokenType.String) return Normalize(reader.GetString());
+        reader.Skip();
+        return "false";
+    }
+
+    public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+    {
+        if (value == "true") writer.WriteBooleanValue(true);
+        else if (value == "auto") writer.WriteStringValue("auto");
+        else writer.WriteBooleanValue(false);
+    }
 }
