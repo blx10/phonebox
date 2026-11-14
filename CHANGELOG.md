@@ -3,10 +3,11 @@
 ## Unreleased
 
 **Panel**
-- 12-hour times: Settings › Display › "12-hour times" shows 2:05 PM instead of 14:05 on the clock, world clocks,
-  night screen, agenda, Next up, countdown, sunrise/sunset, quota resets and "rules paused until" (#31). Off by
-  default.
+- 12-hour times: Settings › Display › Time format shows 2:05 PM instead of 14:05 on the clock, world clocks, night
+  screen, agenda, Next up, countdown, sunrise/sunset, quota resets and "rules paused until" (#31), or follows the
+  phone's own 24-hour setting (#50). 24-hour by default.
 - World clocks with many zones in a narrow widget no longer run their times into each other.
+- Smart Stack: a pause button next to the dots (or a long press on the dots) stops the rotation (#22).
 - GPU details widget: one graphics card in depth (load, VRAM or, for an integrated GPU, its shared memory, power,
   temperature against the card's limit, core and memory clocks, fan, driver and where the data came from). It can show
   the second GPU of a PC, typically the processor's integrated one.
