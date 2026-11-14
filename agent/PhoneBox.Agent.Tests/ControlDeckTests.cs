@@ -254,6 +254,59 @@ public sealed class ControlDeckTests
         }
     }
 
+    [Fact]
+    public async Task ReconcileRadiosStopsRemovedStationAndPreservesRestartedSameIdOnDelayedCallback()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "phonebox-radio-reconcile-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var cfgPath = Path.Combine(dir, "config.json");
+            File.WriteAllText(cfgPath, """
+                {
+                  "controls": {
+                    "actions": [
+                      { "id": "r-1", "label": "Radyo Fenomen", "kind": "radio", "target": "https://example.com/fenomen.mp3", "value": 80 },
+                      { "id": "r-2", "label": "Kafa Radyo", "kind": "radio", "target": "https://example.com/kafa.mp3", "value": 75 }
+                    ]
+                  }
+                }
+                """);
+
+            var native = new FakeRadioDeckNative();
+            var store = new ConfigStore(cfgPath);
+            using var deck = new ControlDeck(store, native, NullLogger<ControlDeck>.Instance);
+
+            Assert.True((await deck.Act("action", "r-1", "", null, null, null, default)).Ok);
+            Assert.Contains("r-1", native.PlayingRadios);
+
+            // Delayed SoundStopped for r-1 arriving while r-1 is still Playing must not clear tracking
+            native.FireStaleSoundStopped("r-1");
+            var stillPlaying = deck.EffectiveMedia(null);
+            Assert.NotNull(stillPlaying);
+            Assert.True(stillPlaying!.Playing);
+            Assert.Equal("Radyo Fenomen", stillPlaying.Title);
+
+            // Removing the playing radio from saved settings stops native playback and clears EffectiveMedia
+            Assert.Null(store.Save("""
+                {
+                  "controls": {
+                    "actions": [
+                      { "id": "r-2", "label": "Kafa Radyo", "kind": "radio", "target": "https://example.com/kafa.mp3", "value": 75 }
+                    ]
+                  }
+                }
+                """));
+            deck.ReconcileRadios(waitForGate: true);
+            Assert.Empty(native.PlayingRadios);
+            Assert.Null(deck.EffectiveMedia(null));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     private sealed class FakeRadioDeckNative : IDeckNative
     {
         private readonly Lock _gate = new();
@@ -269,6 +322,8 @@ public sealed class ControlDeckTests
             lock (_gate) PlayingRadios.Remove(id);
             if (invokeCallback) SoundStopped?.Invoke(id);
         }
+
+        public void FireStaleSoundStopped(string id) => SoundStopped?.Invoke(id);
 
         public DeckAudio Audio() { lock (_gate) return new(true, null, [], []); }
         public bool Device(string id, int? volume, bool? muted, int? channel = null) => true;

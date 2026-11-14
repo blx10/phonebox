@@ -4,7 +4,9 @@ import { W } from '../registry.js';
 let cached = null, at = 0, epoch = 0, pending = null;
 export function invalidateDeckState() {
   epoch++;
+  cached = null;
   at = 0;
+  pending = null;
 }
 export async function deckState(force = false) {
   if (!force && cached && performance.now() - at < 650) return cached;
@@ -20,9 +22,10 @@ export async function deckState(force = false) {
 export async function deckCommand(kind, values = {}) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) if (value != null) query.set(key, String(value));
-  epoch++; at = 0;
+  invalidateDeckState();
   const result = await api(`/controls/command/${encodeURIComponent(kind)}?${query}`, 'POST', 20000);
   if (!result.ok) throw new Error(result.error || 'Control is unavailable');
+  invalidateDeckState();
   if (kind === 'action' || kind === 'sound-stop' || kind === 'media') {
     api('/state' + (evSeq != null ? '?ev=' + evSeq : '')).then(s => {
       if (s && (evSeq == null || s.evSeq == null || s.evSeq >= evSeq) && (!D.state?.ts || !s.ts || s.ts >= D.state.ts)) applyState(s);

@@ -375,6 +375,16 @@ public sealed partial class ControlDeck : BackgroundService
 
     private void OnNativeSoundStopped(string id)
     {
+        lock (_radioGate)
+        {
+            if (_native.ActionState(new DeckAction { Id = id, Kind = "radio" }) == "Playing")
+                return;
+            OnNativeSoundStoppedCore(id);
+        }
+    }
+
+    private void OnNativeSoundStoppedCore(string id)
+    {
         var now = _now();
         var removed = false;
         lock (_radioState)
@@ -392,24 +402,40 @@ public sealed partial class ControlDeck : BackgroundService
         if (removed) Invalidate();
     }
 
-    internal void ReconcileRadios()
+    internal void ReconcileRadios(bool waitForGate = false)
     {
         string[] active;
         lock (_radioState)
         {
-            if (_activeRadios.Count == 0) return;
+            if (_activeRadios.Count == 0 && _lastRadioId is null) return;
             active = [.. _activeRadios];
         }
-        if (!_radioGate.TryEnter()) return;
+        if (waitForGate) _radioGate.Enter();
+        else if (!_radioGate.TryEnter()) return;
         try
         {
             var actions = _config.Get().Controls.Actions;
             var removedAny = false;
             foreach (var id in active)
             {
-                var action = actions.FirstOrDefault(a => a.Kind == "radio" && a.Id == id)
-                    ?? new DeckAction { Id = id, Kind = "radio" };
-                var state = _native.ActionState(action);
+                var configured = actions.FirstOrDefault(a => a.Kind == "radio" && a.Id == id);
+                if (configured is null)
+                {
+                    _native.StopSound(id);
+                    lock (_radioState)
+                    {
+                        if (_activeRadios.Remove(id)) removedAny = true;
+                        if (_lastRadioId == id)
+                        {
+                            _lastRadioId = null;
+                            _radioStartedAt = 0;
+                            _radioElapsedMs = 0;
+                            removedAny = true;
+                        }
+                    }
+                    continue;
+                }
+                var state = _native.ActionState(configured);
                 if (state is null or "Playing") continue;
                 var now = _now();
                 lock (_radioState)
@@ -423,6 +449,16 @@ public sealed partial class ControlDeck : BackgroundService
                             _radioStartedAt = 0;
                         }
                     }
+                }
+            }
+            lock (_radioState)
+            {
+                if (_lastRadioId is not null && !actions.Any(a => a.Kind == "radio" && a.Id == _lastRadioId))
+                {
+                    _lastRadioId = null;
+                    _radioStartedAt = 0;
+                    _radioElapsedMs = 0;
+                    removedAny = true;
                 }
             }
             if (removedAny) Invalidate();

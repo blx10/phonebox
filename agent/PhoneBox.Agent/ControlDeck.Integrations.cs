@@ -106,7 +106,7 @@ public sealed partial class ControlDeck
                     try
                     {
                         state = _native.ActionState(action) ?? "Playback requires Windows";
-                        if (state is not "Playing" and not "Playback requires Windows") OnNativeSoundStopped(action.Id);
+                        if (state is not "Playing" and not "Playback requires Windows") OnNativeSoundStoppedCore(action.Id);
                     }
                     finally { _radioGate.Exit(); }
                 }
