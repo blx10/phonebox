@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -44,7 +45,8 @@ public sealed partial class CloudPhotoService : IDisposable
         long? TakenAtMs,
         string? Caption,
         string? Album,
-        string? SourceLabel
+        string? SourceLabel,
+        bool AllowCloudDownload = false
     );
 
     private readonly ConfigStore _config;
@@ -53,6 +55,8 @@ public sealed partial class CloudPhotoService : IDisposable
     private readonly bool _ownsHttp;
     private readonly string _cacheDir;
     private readonly IReadOnlyList<PhotoLocalRoot>? _customLocalRoots;
+    private readonly Func<FileInfo, bool>? _isCloudOnlyOverride;
+    private readonly Func<string, bool, byte[]>? _localFileReader;
 
     private readonly Lock _gate = new();
     private readonly Dictionary<string, CachedManifest> _manifests = new(StringComparer.Ordinal);
@@ -71,7 +75,9 @@ public sealed partial class CloudPhotoService : IDisposable
         HttpClient http,
         string cacheDir,
         IEnumerable<PhotoLocalRoot>? customLocalRoots = null,
-        bool ownsHttp = false)
+        bool ownsHttp = false,
+        Func<FileInfo, bool>? isCloudOnlyOverride = null,
+        Func<string, bool, byte[]>? localFileReader = null)
     {
         _config = config;
         _auth = auth;
@@ -79,6 +85,8 @@ public sealed partial class CloudPhotoService : IDisposable
         _cacheDir = cacheDir;
         _customLocalRoots = customLocalRoots?.ToList();
         _ownsHttp = ownsHttp;
+        _isCloudOnlyOverride = isCloudOnlyOverride;
+        _localFileReader = localFileReader;
     }
 
     private static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -201,10 +209,37 @@ public sealed partial class CloudPhotoService : IDisposable
             return new PhotoTestResponse(false, MissingSourceMessage(settings.Provider), 0, "");
 
         var feed = await GetFeedAsync(settings, refresh: true, ct);
+        if (!settings.DownloadCloudFiles && feed.Photos.Count == 0 && feed.CloudOnlyCount > 0)
+        {
+            return new PhotoTestResponse(
+                false,
+                $"Found {feed.CloudOnlyCount} cloud-only photo{(feed.CloudOnlyCount == 1 ? "" : "s")} in {feed.SourceLabel}. Enable \"Download cloud-only files on demand\" below — viewing them will download photos from your cloud storage onto this computer.",
+                0,
+                feed.SourceLabel,
+                feed.CloudOnlyCount);
+        }
         if (!string.IsNullOrEmpty(feed.Error))
-            return new PhotoTestResponse(false, feed.Error, feed.Photos.Count, feed.SourceLabel);
+            return new PhotoTestResponse(false, feed.Error, feed.Photos.Count, feed.SourceLabel, feed.CloudOnlyCount);
         if (feed.Photos.Count == 0)
             return new PhotoTestResponse(false, $"No supported photos found in {feed.SourceLabel}", 0, feed.SourceLabel);
+        if (!settings.DownloadCloudFiles && feed.CloudOnlyCount > 0)
+        {
+            return new PhotoTestResponse(
+                true,
+                $"Found {feed.Photos.Count} local photo{(feed.Photos.Count == 1 ? "" : "s")} in {feed.SourceLabel} ({feed.CloudOnlyCount} cloud-only skipped — enable on-demand download to include them)",
+                feed.Photos.Count,
+                feed.SourceLabel,
+                feed.CloudOnlyCount);
+        }
+        if (settings.DownloadCloudFiles && feed.CloudOnlyCount > 0)
+        {
+            return new PhotoTestResponse(
+                true,
+                $"Found {feed.Photos.Count} photo{(feed.Photos.Count == 1 ? "" : "s")} in {feed.SourceLabel} ({feed.CloudOnlyCount} in cloud — photos will be downloaded onto this computer as they are shown)",
+                feed.Photos.Count,
+                feed.SourceLabel,
+                feed.CloudOnlyCount);
+        }
 
         return new PhotoTestResponse(true, $"Found {feed.Photos.Count} photo{(feed.Photos.Count == 1 ? "" : "s")} in {feed.SourceLabel}", feed.Photos.Count, feed.SourceLabel);
     }
@@ -248,7 +283,7 @@ public sealed partial class CloudPhotoService : IDisposable
         }
 
         if (item.LocalFilePath is not null && item.LocalRootPath is not null)
-            return await ReadSafeLocalImageAsync(item.LocalRootPath, item.LocalFilePath, ct);
+            return await ReadSafeLocalImageAsync(item.LocalRootPath, item.LocalFilePath, item.AllowCloudDownload, ct);
 
         var cachedPath = Path.Combine(_cacheDir, id + ".bin");
         if (File.Exists(cachedPath))
@@ -326,7 +361,7 @@ public sealed partial class CloudPhotoService : IDisposable
         var ct = cts.Token;
         try
         {
-            var (sourceLabel, resolved) = await FetchProviderItemsAsync(settings, ct);
+            var (sourceLabel, resolved, cloudOnlyCount) = await FetchProviderItemsAsync(settings, ct);
             var feedItems = new List<PhotoFeedItem>(resolved.Count);
 
             lock (_gate)
@@ -346,6 +381,10 @@ public sealed partial class CloudPhotoService : IDisposable
                 }
             }
 
+            var errorMsg = !settings.DownloadCloudFiles && feedItems.Count == 0 && cloudOnlyCount > 0
+                ? $"{cloudOnlyCount} cloud-only photo{(cloudOnlyCount == 1 ? " was" : "s were")} not downloaded. Enable \"Download cloud-only files on demand\" in PhoneBox Settings to allow cloud downloads."
+                : null;
+
             var response = new PhotoFeedResponse(
                 Configured: true,
                 Provider: settings.Provider,
@@ -353,8 +392,9 @@ public sealed partial class CloudPhotoService : IDisposable
                 Title: NullIfEmpty(settings.Title),
                 UpdatedAt: NowMs,
                 Stale: false,
-                Error: null,
-                Photos: feedItems);
+                Error: errorMsg,
+                Photos: feedItems,
+                CloudOnlyCount: cloudOnlyCount);
 
             lock (_gate)
             {
@@ -407,7 +447,7 @@ public sealed partial class CloudPhotoService : IDisposable
         };
     }
 
-    private async Task<(string SourceLabel, List<ResolvedPhoto> Items)> FetchProviderItemsAsync(
+    private async Task<(string SourceLabel, List<ResolvedPhoto> Items, int CloudOnlyCount)> FetchProviderItemsAsync(
         PhotoWidgetSettings s,
         CancellationToken ct)
     {
@@ -426,7 +466,7 @@ public sealed partial class CloudPhotoService : IDisposable
             return FetchFromLocalDirectory(s, s.Folder, $"{CloudPhotoAuth.ProviderDisplayName(s.Provider)} (synced)");
         }
 
-        return s.Provider switch
+        var (sourceLabel, items) = s.Provider switch
         {
             "icloud" => await FetchICloudSharedAlbumAsync(s, ct),
             "onedrive" => await FetchOneDriveAsync(s, ct),
@@ -435,11 +475,12 @@ public sealed partial class CloudPhotoService : IDisposable
             "nextcloud" => await FetchNextcloudShareAsync(s, ct),
             _ => throw new IOException($"Unsupported photo provider '{s.Provider}'"),
         };
+        return (sourceLabel, items, 0);
     }
 
     // ---------------------------------------------------------------- local & synced folder
 
-    private (string SourceLabel, List<ResolvedPhoto> Items) FetchFromLocalDirectory(
+    private (string SourceLabel, List<ResolvedPhoto> Items, int CloudOnlyCount) FetchFromLocalDirectory(
         PhotoWidgetSettings s,
         string rawFolder,
         string fallbackLabel)
@@ -459,6 +500,8 @@ public sealed partial class CloudPhotoService : IDisposable
         var dirs = new Queue<string>();
         dirs.Enqueue(rootFull);
         var inspected = 0;
+        var cloudOnlySkipped = 0;
+        var cloudOnlyIncluded = 0;
 
         while (dirs.Count > 0 && items.Count < MaxManifestItems && inspected < MaxLocalScanEntries)
         {
@@ -491,7 +534,7 @@ public sealed partial class CloudPhotoService : IDisposable
                 }
                 catch { continue; }
 
-                if ((fsi.Attributes & FileAttributes.ReparsePoint) != 0 || fsi.LinkTarget is not null)
+                if (fsi.LinkTarget is not null)
                     continue;
 
                 var fullEntry = Path.GetFullPath(entry);
@@ -500,8 +543,16 @@ public sealed partial class CloudPhotoService : IDisposable
 
                 if (fsi is DirectoryInfo)
                 {
+                    if ((fsi.Attributes & FileAttributes.ReparsePoint) != 0)
+                        continue;
                     if (s.Subfolders && !name.EndsWith(".photoslibrary", StringComparison.OrdinalIgnoreCase))
                         dirs.Enqueue(fullEntry);
+                    continue;
+                }
+
+                if ((fsi.Attributes & FileAttributes.ReparsePoint) != 0
+                    && !(OperatingSystem.IsWindows() && IsWindowsCloudPlaceholder(fsi.Attributes)))
+                {
                     continue;
                 }
 
@@ -511,12 +562,20 @@ public sealed partial class CloudPhotoService : IDisposable
                 var fileInfo = (FileInfo)fsi;
                 if (fileInfo.Length is <= 0 or > SafePhotoHttp.MaxImageBytes) continue;
 
+                var isCloudOnly = IsCloudOnlyPlaceholder(fileInfo);
+                if (isCloudOnly && !s.DownloadCloudFiles)
+                {
+                    cloudOnlySkipped++;
+                    continue;
+                }
+                if (isCloudOnly) cloudOnlyIncluded++;
+
                 var takenAt = new DateTimeOffset(fileInfo.LastWriteTimeUtc).ToUnixTimeMilliseconds();
-                var albumName = string.Equals(Path.GetDirectoryName(fullEntry), rootFull, PathComparison)
+                var albumName = PathsEqual(Path.GetDirectoryName(fullEntry), rootFull)
                     ? label
                     : Path.GetFileName(Path.GetDirectoryName(fullEntry) ?? label);
                 var caption = Path.GetFileNameWithoutExtension(name);
-                var id = ComputeId("local", fullEntry, takenAt.ToString(CultureInfo.InvariantCulture));
+                var id = ComputeId("local", fullEntry, $"{takenAt.ToString(CultureInfo.InvariantCulture)}:{(s.DownloadCloudFiles ? "dl1" : "dl0")}");
                 items.Add(new ResolvedPhoto(
                     Id: id,
                     Provider: "local",
@@ -528,11 +587,12 @@ public sealed partial class CloudPhotoService : IDisposable
                     TakenAtMs: takenAt,
                     Caption: caption,
                     Album: albumName,
-                    SourceLabel: label));
+                    SourceLabel: label,
+                    AllowCloudDownload: s.DownloadCloudFiles));
             }
         }
 
-        return (label, items);
+        return (label, items, s.DownloadCloudFiles ? cloudOnlyIncluded : cloudOnlySkipped);
     }
 
     private PhotoBrowseResponse BrowseLocal(string? rawPath)
@@ -567,9 +627,10 @@ public sealed partial class CloudPhotoService : IDisposable
         return new PhotoBrowseResponse(true, null, "local", full, parent, entries);
     }
 
-    private static async Task<(byte[] Bytes, string Mime)?> ReadSafeLocalImageAsync(
+    private async Task<(byte[] Bytes, string Mime)?> ReadSafeLocalImageAsync(
         string rootPath,
         string filePath,
+        bool allowCloudDownload,
         CancellationToken ct)
     {
         var rootFull = TryResolveSafeDirectory(rootPath);
@@ -580,15 +641,124 @@ public sealed partial class CloudPhotoService : IDisposable
             return null;
 
         var fi = new FileInfo(fullFile);
-        if (!fi.Exists || (fi.Attributes & FileAttributes.ReparsePoint) != 0 || fi.LinkTarget is not null)
+        if (!fi.Exists || fi.LinkTarget is not null)
+            return null;
+        if ((fi.Attributes & FileAttributes.ReparsePoint) != 0
+            && !(OperatingSystem.IsWindows() && IsWindowsCloudPlaceholder(fi.Attributes)))
             return null;
         if (fi.Length is <= 0 or > SafePhotoHttp.MaxImageBytes)
             return null;
+        if (IsCloudOnlyPlaceholder(fi) && !allowCloudDownload)
+            return null;
 
-        var bytes = await File.ReadAllBytesAsync(fullFile, ct);
+        byte[] bytes;
+        using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        readCts.CancelAfter(TimeSpan.FromSeconds(25));
+        try
+        {
+            if (_localFileReader is not null)
+                bytes = _localFileReader(fullFile, allowCloudDownload);
+            else if (OperatingSystem.IsMacOS() && allowCloudDownload)
+                bytes = await Task.Run(() => ReadMacFileMaterializing(fullFile), readCts.Token);
+            else
+                bytes = await File.ReadAllBytesAsync(fullFile, readCts.Token);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            return null;
+        }
+
         var mime = SafePhotoHttp.DetectRasterMime(bytes);
         return mime is null ? null : (bytes, mime);
     }
+
+    private bool IsCloudOnlyPlaceholder(FileInfo fi)
+    {
+        if (_isCloudOnlyOverride is not null)
+            return _isCloudOnlyOverride(fi);
+        if (OperatingSystem.IsMacOS())
+            return IsMacDatalessFile(fi.FullName);
+        if (OperatingSystem.IsWindows())
+            return IsWindowsCloudPlaceholder(fi.Attributes);
+        return false;
+    }
+
+    private static bool IsWindowsCloudPlaceholder(FileAttributes attr) =>
+        ((int)attr & (0x00400000 | 0x00040000 | (int)FileAttributes.Offline)) != 0;
+
+    private static bool IsMacDatalessFile(string fullPath)
+    {
+        if (!OperatingSystem.IsMacOS()) return false;
+        try
+        {
+            var al = new DarwinAttrList { bitmapcount = ATTR_BIT_MAP_COUNT, commonattr = ATTR_CMN_FLAGS };
+            var rc = DarwinGetAttrList(fullPath, ref al, out var buf, (nuint)Marshal.SizeOf<DarwinFlagsAttrBuf>(), FSOPT_NOFOLLOW);
+            return rc == 0 && (buf.flags & SF_DATALESS) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static byte[] ReadMacFileMaterializing(string fullFile)
+    {
+        var prev = DarwinGetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD);
+        DarwinSetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_ON);
+        try
+        {
+            return File.ReadAllBytes(fullFile);
+        }
+        finally
+        {
+            DarwinSetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, prev >= 0 ? prev : 0);
+        }
+    }
+
+    private const ushort ATTR_BIT_MAP_COUNT = 5;
+    private const uint ATTR_CMN_FLAGS = 0x00040000u;
+    private const uint FSOPT_NOFOLLOW = 0x00000001u;
+    private const uint SF_DATALESS = 0x40000000u;
+    private const int IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES = 3;
+    private const int IOPOL_SCOPE_THREAD = 1;
+    private const int IOPOL_MATERIALIZE_DATALESS_FILES_ON = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DarwinAttrList
+    {
+        public ushort bitmapcount;
+        public ushort reserved;
+        public uint commonattr;
+        public uint volattr;
+        public uint dirattr;
+        public uint fileattr;
+        public uint forkattr;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DarwinFlagsAttrBuf
+    {
+        public uint length;
+        public uint flags;
+    }
+
+    [DllImport("libSystem.dylib", EntryPoint = "getattrlist")]
+    private static extern int DarwinGetAttrList(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        ref DarwinAttrList attrList,
+        out DarwinFlagsAttrBuf attrBuf,
+        nuint attrBufSize,
+        uint options);
+
+    [DllImport("libSystem.dylib", EntryPoint = "getiopolicy_np")]
+    private static extern int DarwinGetIoPolicy(int iotype, int scope);
+
+    [DllImport("libSystem.dylib", EntryPoint = "setiopolicy_np")]
+    private static extern int DarwinSetIoPolicy(int iotype, int scope, int policy);
 
     // ---------------------------------------------------------------- iCloud Shared Album
 
@@ -1674,7 +1844,7 @@ public sealed partial class CloudPhotoService : IDisposable
         var pwdHash = string.IsNullOrEmpty(s.SharePassword)
             ? ""
             : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s.SharePassword))[..8]);
-        return $"{s.Provider}|{s.ShareUrl}|{pwdHash}|{s.AlbumId}|{s.Folder}|{(s.Subfolders ? '1' : '0')}";
+        return $"{s.Provider}|{s.ShareUrl}|{pwdHash}|{s.AlbumId}|{s.Folder}|{(s.Subfolders ? '1' : '0')}|{(s.DownloadCloudFiles ? '1' : '0')}";
     }
 
     private static string ComputeId(string provider, string key, string stamp)
@@ -1767,9 +1937,20 @@ public sealed partial class CloudPhotoService : IDisposable
     private static string EnsureTrailingSep(string fullPath) =>
         fullPath.EndsWith(Path.DirectorySeparatorChar) ? fullPath : fullPath + Path.DirectorySeparatorChar;
 
-    private static bool IsPathInsideRoot(string fullCandidate, string rootFull, string rootWithSep) =>
-        string.Equals(fullCandidate, rootFull, PathComparison)
-        || fullCandidate.StartsWith(rootWithSep, PathComparison);
+    private static string NormalizeMacPath(string path) =>
+        OperatingSystem.IsMacOS() ? path.Normalize(NormalizationForm.FormC) : path;
+
+    internal static bool PathsEqual(string? a, string? b) =>
+        a is not null && b is not null
+        && string.Equals(NormalizeMacPath(a), NormalizeMacPath(b), PathComparison);
+
+    internal static bool IsPathInsideRoot(string fullCandidate, string rootFull, string rootWithSep)
+    {
+        var cand = NormalizeMacPath(fullCandidate);
+        var root = NormalizeMacPath(rootFull);
+        var pref = NormalizeMacPath(rootWithSep);
+        return string.Equals(cand, root, PathComparison) || cand.StartsWith(pref, PathComparison);
+    }
 
     private static void AddGlobCloudStorage(
         List<(string Id, string Name, string Hint, string? Path)> candidates,

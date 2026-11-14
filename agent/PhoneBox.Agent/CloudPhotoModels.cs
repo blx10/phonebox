@@ -42,7 +42,8 @@ public sealed record PhotoWidgetSettings(
     string Info,
     bool ClockOverlay,
     string TapAction,
-    string Title
+    string Title,
+    bool DownloadCloudFiles = false
 );
 
 /// <summary>Validation and public-option scrubbing for Photo frame widgets (standalone or inside Smart Stack).</summary>
@@ -104,10 +105,12 @@ public static class PhotoWidgetOptions
         var title = (Str(options, "title") ?? "").Trim();
         if (title.Length > 80) title = title[..80];
 
+        var downloadCloudFiles = Bool(options, "downloadCloudFiles") == true;
+
         return new PhotoWidgetSettings(
             provider, shareUrl, sharePassword, albumId, folder,
             subfolders, interval, order, fit, transition,
-            info, clockOverlay, tapAction, title);
+            info, clockOverlay, tapAction, title, downloadCloudFiles);
     }
 
     public static void NormalizeWidget(WidgetConfig w)
@@ -173,6 +176,8 @@ public static class PhotoWidgetOptions
             options["folder"] = JsonSerializer.SerializeToElement((Str(options, "folder") ?? "").Trim());
         if (options.ContainsKey("subfolders"))
             options["subfolders"] = JsonSerializer.SerializeToElement(Bool(options, "subfolders") != false);
+        if (options.ContainsKey("downloadCloudFiles"))
+            options["downloadCloudFiles"] = JsonSerializer.SerializeToElement(Bool(options, "downloadCloudFiles") == true);
         if (options.ContainsKey("interval"))
             options["interval"] = JsonSerializer.SerializeToElement(Math.Clamp(Int(options, "interval") ?? 60, 5, 86400));
         if (options.ContainsKey("order"))
@@ -251,7 +256,8 @@ public sealed record PhotoFeedResponse(
     long UpdatedAt,
     bool Stale,
     string? Error,
-    IReadOnlyList<PhotoFeedItem> Photos
+    IReadOnlyList<PhotoFeedItem> Photos,
+    int CloudOnlyCount = 0
 );
 
 public sealed record PhotoBrowseEntry(
@@ -282,7 +288,8 @@ public sealed record PhotoTestResponse(
     bool Ok,
     string Message,
     int Count,
-    string SourceLabel
+    string SourceLabel,
+    int CloudOnlyCount = 0
 );
 
 public sealed record PhotoProviderStatus(

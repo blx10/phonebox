@@ -778,4 +778,104 @@ public sealed class CloudPhotoTests
         Assert.False(Lan.AllowedOverLan(new PathString("/api/photos/oauth/connect/onedrive")));
         Assert.False(Lan.AllowedOverLan(new PathString("/api/photos/oauth/callback/onedrive")));
     }
+
+    [Fact]
+    public async Task CloudOnlySyncedFilesRequireOptInWarnAndMaterializeSafely()
+    {
+        using var env = new TempPhotoEnv();
+        var nfdFolder = Path.Combine(env.RootDir, "OneDrive-Kis\u0327isel");
+        var nfcFolder = Path.Combine(env.RootDir, "OneDrive-Kişisel");
+        Directory.CreateDirectory(nfdFolder);
+        var cloudPhoto = Path.Combine(nfdFolder, "cloud-trip.jpg");
+        var localPhoto = Path.Combine(nfdFolder, "local-shot.png");
+        File.WriteAllBytes(cloudPhoto, MinimalJpeg);
+        File.WriteAllBytes(localPhoto, MinimalPng);
+
+        // macOS NFC/NFD normalization check
+        Assert.True(CloudPhotoService.IsPathInsideRoot(
+            Path.Combine(nfdFolder, "cloud-trip.jpg"),
+            nfcFolder,
+            nfcFolder + Path.DirectorySeparatorChar) || !OperatingSystem.IsMacOS());
+
+        var store = env.WriteConfig(new { });
+        using var auth = new CloudPhotoAuth(store, new AgentEndpoint(19996));
+
+        var readerCalls = 0;
+        var simulateDeadlock = false;
+        using var service = new CloudPhotoService(
+            store,
+            auth,
+            new HttpClient(),
+            env.CacheDir,
+            isCloudOnlyOverride: fi => string.Equals(fi.Name, "cloud-trip.jpg", StringComparison.Ordinal),
+            localFileReader: (path, allowDl) =>
+            {
+                readerCalls++;
+                if (simulateDeadlock)
+                    throw new IOException("Resource deadlock avoided : '" + path + "'");
+                return File.ReadAllBytes(path);
+            });
+
+        // 1. Only cloud-only folder -> opt-in disabled skips cloud file and returns download warning
+        var cloudOnlySub = Directory.CreateDirectory(Path.Combine(env.PhotoDir, "CloudOnly")).FullName;
+        var soleCloudFile = Path.Combine(cloudOnlySub, "cloud-trip.jpg");
+        File.WriteAllBytes(soleCloudFile, MinimalJpeg);
+
+        var optOutOpts = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(new
+        {
+            provider = "local",
+            folder = cloudOnlySub,
+            downloadCloudFiles = false,
+        }));
+        var optOutFeed = await service.GetPreviewFeedAsync(new PhotoPreviewRequest(optOutOpts), default);
+        Assert.True(optOutFeed.Configured);
+        Assert.Equal(1, optOutFeed.CloudOnlyCount);
+        Assert.Empty(optOutFeed.Photos);
+        Assert.Contains("Download cloud-only files on demand", optOutFeed.Error);
+
+        var optOutTest = await service.TestSourceAsync(new PhotoTestRequest(optOutOpts), default);
+        Assert.False(optOutTest.Ok);
+        Assert.Equal(1, optOutTest.CloudOnlyCount);
+        Assert.Contains("download photos from your cloud storage", optOutTest.Message);
+
+        // 2. Opt-in disabled with mixed local + cloud-only skips cloud file safely
+        var mixedOptOut = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(new
+        {
+            provider = "onedrive",
+            folder = nfdFolder,
+            downloadCloudFiles = false,
+        }));
+        var mixedTest = await service.TestSourceAsync(new PhotoTestRequest(mixedOptOut), default);
+        Assert.True(mixedTest.Ok);
+        Assert.Equal(1, mixedTest.Count);
+        Assert.Equal(1, mixedTest.CloudOnlyCount);
+        Assert.Contains("cloud-only skipped", mixedTest.Message);
+
+        // 3. Opt-in enabled includes cloud-only file, warns about download, and handles IOException gracefully
+        var optInOpts = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(new
+        {
+            provider = "local",
+            folder = cloudOnlySub,
+            downloadCloudFiles = true,
+        }));
+        Assert.True(PhotoWidgetOptions.Parse(optInOpts).DownloadCloudFiles);
+
+        var optInTest = await service.TestSourceAsync(new PhotoTestRequest(optInOpts), default);
+        Assert.True(optInTest.Ok);
+        Assert.Equal(1, optInTest.Count);
+        Assert.Equal(1, optInTest.CloudOnlyCount);
+        Assert.Contains("will be downloaded onto this computer", optInTest.Message);
+
+        var optInFeed = await service.GetPreviewFeedAsync(new PhotoPreviewRequest(optInOpts), default);
+        var item = Assert.Single(optInFeed.Photos);
+
+        simulateDeadlock = true;
+        Assert.Null(await service.GetPhotoBytesAsync(item.Id, default));
+
+        simulateDeadlock = false;
+        var okBytes = await service.GetPhotoBytesAsync(item.Id, default);
+        Assert.NotNull(okBytes);
+        Assert.Equal("image/jpeg", okBytes!.Value.Mime);
+        Assert.Equal(2, readerCalls);
+    }
 }

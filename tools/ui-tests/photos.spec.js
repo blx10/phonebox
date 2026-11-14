@@ -104,10 +104,25 @@ test('photo frame supports pause and info tap modes and Smart Stack embedding', 
   await expect(page.locator('.stack-item.active .w-photos .ph-layer.on .ph-img')).toHaveAttribute('src', /^blob:/);
   await expect(page.locator('.stack-item.active .w-photos .ph-title')).toHaveText('In Stack');
 
+  await showPhotos(page, {
+    provider: 'local',
+    folder: '~/OneDrive/CloudOnly',
+    downloadCloudFiles: false,
+  });
+  await expect(page.locator('.w-photos .empty')).toContainText('Download cloud-only files on demand');
+
+  await showPhotos(page, {
+    provider: 'local',
+    folder: '~/OneDrive/CloudOnly',
+    downloadCloudFiles: true,
+    title: 'Cloud Ready',
+  });
+  await expect(page.locator('.w-photos .ph-layer.on .ph-img')).toHaveAttribute('src', /^blob:/);
+
   expect(errors).toEqual([]);
 });
 
-test('settings page configures Cloud photos OAuth card, Photo frame providers, folder browser and Smart Stack child', async ({ page }) => {
+test('settings page configures Cloud photos OAuth card, Photo frame providers, cloud warning, folder browser and Smart Stack child', async ({ page }) => {
   const errors = watchErrors(page);
   await page.goto('/settings/');
   await expect(page.locator('#cloudPhotosCard')).toBeAttached();
@@ -148,6 +163,16 @@ test('settings page configures Cloud photos OAuth card, Photo frame providers, f
 
   await inspector.getByRole('button', { name: 'Test source' }).click();
   await expect(inspector).toContainText('Found 3 photos');
+
+  // Cloud-only folder warning and explicit download opt-in toggle
+  await inspector.locator('.chip', { hasText: 'OneDrive › CloudOnly' }).click();
+  await expect(inspector.locator('.photos-warn')).toBeVisible();
+  await expect(inspector.locator('.photos-warn')).toContainText('Cloud-only files detected (3)');
+  const dlCheck = inspector.getByLabel('Download cloud-only files on demand');
+  await expect(dlCheck).not.toBeChecked();
+  await dlCheck.check();
+  await expect(inspector.locator('.photos-warn')).toContainText('Cloud download enabled');
+  await expect(inspector).toContainText('photos will be downloaded onto this computer as they are shown');
 
   // Smart Stack child configuration
   await page.locator('#palette button.pal', { hasText: 'Smart Stack' }).click();

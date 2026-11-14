@@ -50,6 +50,7 @@ W.photos = {
     let layerCursor = 0;
     let layerBlobs = [null, null];
     let bgBlob = null;
+    let downloadingCloud = false;
 
     const fit = ['cover', 'contain-blur', 'contain'].includes(o.fit) ? o.fit : 'cover';
     const transition = ['fade', 'kenburns', 'slide', 'none'].includes(o.transition) ? o.transition : 'fade';
@@ -99,6 +100,7 @@ W.photos = {
 
       let stateText = '';
       if (paused) stateText = 'Paused';
+      else if (downloadingCloud) stateText = 'Downloading from cloud…';
       else if (feed?.stale) stateText = online === false ? 'Offline (cached)' : 'Cached';
       stateBadge.textContent = stateText;
       stateBadge.hidden = !stateText;
@@ -155,7 +157,13 @@ W.photos = {
       if (slideAbort) slideAbort.abort();
       slideAbort = new AbortController();
 
-      for (let attempts = 0; attempts < playlist.length; attempts++) {
+      const maxAttempts = Math.min(playlist.length, 8);
+      const mayDownloadFromCloud = (feed?.cloudOnlyCount > 0) || (o.provider && o.provider !== 'local');
+      if (mayDownloadFromCloud && !emptyEl.hidden) {
+        emptyEl.textContent = 'Downloading photo from cloud…';
+      }
+
+      for (let attempts = 0; attempts < maxAttempts; attempts++) {
         if (order === 'shuffle' && index + step >= playlist.length && attempts === 0) {
           playlist = shuffleArray(feed?.photos || playlist);
           index = -1;
@@ -164,8 +172,19 @@ W.photos = {
         const item = playlist[index];
 
         let blobUrl = null;
+        let dlTimer = null;
         try {
+          if (mayDownloadFromCloud) {
+            dlTimer = setTimeout(() => {
+              if (!destroyed && mySeq === slideSeq) {
+                downloadingCloud = true;
+                updateBadges();
+              }
+            }, 350);
+          }
           blobUrl = await fetchPhotoBlobUrl(item.url, slideAbort.signal);
+          if (dlTimer) { clearTimeout(dlTimer); dlTimer = null; }
+          if (downloadingCloud) { downloadingCloud = false; updateBadges(); }
           if (destroyed || mySeq !== slideSeq) {
             URL.revokeObjectURL(blobUrl);
             return;
@@ -211,6 +230,8 @@ W.photos = {
           visibleElapsedMs = 0;
           return;
         } catch (err) {
+          if (dlTimer) { clearTimeout(dlTimer); dlTimer = null; }
+          if (downloadingCloud) { downloadingCloud = false; updateBadges(); }
           if (blobUrl) URL.revokeObjectURL(blobUrl);
           if (err?.name === 'AbortError' || destroyed || mySeq !== slideSeq) return;
           step = 1;

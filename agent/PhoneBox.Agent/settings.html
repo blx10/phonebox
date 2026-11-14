@@ -165,6 +165,8 @@ table.items td.val { font-family: Consolas, monospace; font-size: 12px; max-widt
 .browse-row { display: flex; align-items: center; gap: 10px; justify-content: space-between; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
 .browse-row strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .photos-box { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel-2); }
+.photos-warn { border: 1px solid color-mix(in srgb, #f59e0b 48%, var(--line)); background: color-mix(in srgb, #f59e0b 11%, var(--panel-2)); color: var(--text); border-radius: 10px; padding: 9px 12px; margin: 6px 0 12px; font-size: 12.5px; line-height: 1.45; }
+.photos-warn strong { color: #fbbf24; font-weight: 600; }
 
 /* shortcuts */
 .deck { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
@@ -1561,9 +1563,18 @@ function renderPhotosOptionsPanel(w, setFn) {
   const root = h('div', { class: 'photos-inspector' });
   const dynamicBox = h('div');
 
+  const looksLikeLocalPath = (p) => {
+    const s = (p || '').trim();
+    return s.startsWith('/') || s === '~' || s.startsWith('~/') || s.startsWith('~\\') || /^[A-Za-z]:[\\/]/.test(s);
+  };
+  const looksLikeCloudSyncedPath = (p, prov) =>
+    prov === 'onedrive' || prov === 'google' || prov === 'dropbox' || prov === 'icloud'
+    || /CloudStorage|OneDrive|iCloud|Mobile Documents|Google ?Drive|Dropbox/i.test(p || '');
+
   const renderSourceFields = () => {
     const provider = getVal('provider') || 'local';
     const kids = [];
+    let detectedCloudOnly = 0;
 
     const st = (photoStatusData.providers || []).find((x) => x.provider === provider);
     if (['onedrive', 'google', 'dropbox'].includes(provider)) {
@@ -1575,6 +1586,37 @@ function renderPhotosOptionsPanel(w, setFn) {
         !st?.connected ? h('a', { href: '#general', onclick: (e) => { e.preventDefault(); location.hash = '#general'; } }, 'Open Cloud photos setup ›') : null));
     }
 
+    const warnBox = h('div', { class: 'photos-warn', hidden: true });
+    const updateWarnBox = () => {
+      const shareUrl = (getVal('shareUrl') || '').trim();
+      const folder = (getVal('folder') || '').trim();
+      const albumId = (getVal('albumId') || '').trim();
+      const allowDl = getVal('downloadCloudFiles') === true;
+      const isRemoteStream = provider === 'nextcloud'
+        || (provider === 'icloud' && shareUrl.length > 0)
+        || (['onedrive', 'google', 'dropbox'].includes(provider) && (albumId.length > 0 || (st?.connected && !looksLikeLocalPath(folder))));
+
+      if (isRemoteStream) {
+        warnBox.replaceChildren('⚠️ ', h('strong', {}, 'Cloud download notice: '),
+          'Photos from this cloud source will be downloaded over the internet onto this computer and cached locally (up to the General › Cloud photos limit) as they are displayed.');
+        warnBox.hidden = false;
+      } else if (allowDl) {
+        warnBox.replaceChildren('⚠️ ', h('strong', {}, 'Cloud download enabled: '),
+          'Cloud-only (Files On-Demand) photos in this folder will be downloaded from your cloud storage onto this computer as the slideshow displays them, using network data and local disk space.');
+        warnBox.hidden = false;
+      } else if (detectedCloudOnly > 0) {
+        warnBox.replaceChildren('⚠️ ', h('strong', {}, `Cloud-only files detected (${detectedCloudOnly}): `),
+          'These photos are stored in the cloud and are not on disk yet. Enable "Download cloud-only files on demand" below to allow PhoneBox to download them onto this computer as they are shown.');
+        warnBox.hidden = false;
+      } else if (looksLikeCloudSyncedPath(folder, provider)) {
+        warnBox.replaceChildren('⚠️ ', h('strong', {}, 'Cloud-synced folder: '),
+          'Online-only (Files On-Demand) photos are not downloaded automatically unless you enable "Download cloud-only files on demand" below (which downloads photos from the cloud onto this computer when displayed).');
+        warnBox.hidden = false;
+      } else {
+        warnBox.hidden = true;
+      }
+    };
+
     if (provider === 'icloud') {
       kids.push(h('div', { class: 'field' },
         h('label', {}, 'iCloud Shared Album link'),
@@ -1583,7 +1625,7 @@ function renderPhotosOptionsPanel(w, setFn) {
           placeholder: 'https://www.icloud.com/sharedalbum/#...',
           value: getVal('shareUrl') ?? '',
           spellcheck: 'false',
-          oninput: (e) => setOpt('shareUrl', e.target.value)
+          oninput: (e) => { setOpt('shareUrl', e.target.value); updateWarnBox(); }
         }),
         h('span', { class: 'hint' }, 'Works immediately with any public iCloud Shared Album URL — no login required. Or leave blank and pick a synced iCloud Photos folder below.')));
     } else if (provider === 'nextcloud') {
@@ -1595,7 +1637,7 @@ function renderPhotosOptionsPanel(w, setFn) {
             placeholder: 'https://cloud.example.com/s/...',
             value: getVal('shareUrl') ?? '',
             spellcheck: 'false',
-            oninput: (e) => setOpt('shareUrl', e.target.value)
+            oninput: (e) => { setOpt('shareUrl', e.target.value); updateWarnBox(); }
           })),
         h('div', { class: 'field' },
           h('label', {}, 'Share password (optional)'),
@@ -1613,6 +1655,26 @@ function renderPhotosOptionsPanel(w, setFn) {
       : provider === 'nextcloud' ? 'Subfolder inside share (optional)'
       : 'Folder or album path';
 
+    const testState = h('span', { class: 'hint' }, '');
+    const runSourceCheck = async (silent = false) => {
+      if (!silent) testState.textContent = 'Checking source…';
+      try {
+        const r = await fetch('/api/photos/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ options: w.options || {} }),
+        });
+        const res = await r.json();
+        detectedCloudOnly = res.cloudOnlyCount || 0;
+        updateWarnBox();
+        if (!silent || detectedCloudOnly > 0 || testState.textContent) {
+          testState.textContent = res.message || (res.ok ? 'OK' : 'Source check failed');
+        }
+      } catch (_) {
+        if (!silent) testState.textContent = 'Could not reach agent';
+      }
+    };
+
     folderInput = h('input', {
       type: 'text',
       style: { flex: '1' },
@@ -1620,8 +1682,10 @@ function renderPhotosOptionsPanel(w, setFn) {
       value: getVal('folder') ?? '',
       spellcheck: 'false',
       oninput: (e) => {
+        detectedCloudOnly = 0;
         setOpt('folder', e.target.value);
         if (getVal('albumId')) setOpt('albumId', '');
+        updateWarnBox();
       }
     });
 
@@ -1629,9 +1693,12 @@ function renderPhotosOptionsPanel(w, setFn) {
       type: 'button',
       class: 'btn sm',
       onclick: () => openPhotosBrowser(provider, w, (pick) => {
+        detectedCloudOnly = 0;
         setOpt('folder', pick.folder || '');
         setOpt('albumId', pick.albumId || '');
         folderInput.value = pick.folder || '';
+        updateWarnBox();
+        if (!pick.albumId && looksLikeLocalPath(pick.folder)) runSourceCheck(true);
       })
     }, 'Browse…');
 
@@ -1648,36 +1715,48 @@ function renderPhotosOptionsPanel(w, setFn) {
           type: 'button',
           class: 'chip' + (getVal('folder') === r.path ? ' on' : ''),
           onclick: () => {
+            detectedCloudOnly = 0;
             setOpt('folder', r.path);
             setOpt('albumId', '');
             folderInput.value = r.path;
+            updateWarnBox();
+            runSourceCheck(true);
           }
         }, r.name))));
     }
 
-    const testState = h('span', { class: 'hint' }, '');
+    if (provider !== 'nextcloud') {
+      kids.push(h('label', { class: 'check', style: { marginBottom: '8px' } },
+        h('input', {
+          type: 'checkbox',
+          checked: getVal('downloadCloudFiles') === true,
+          onchange: (e) => {
+            setOpt('downloadCloudFiles', e.target.checked);
+            updateWarnBox();
+            if ((getVal('folder') || '').trim() && looksLikeLocalPath(getVal('folder'))) runSourceCheck(true);
+          }
+        }),
+        optsByKey.downloadCloudFiles?.label || 'Download cloud-only files on demand'));
+    }
+
+    updateWarnBox();
+    kids.push(warnBox);
+
     kids.push(h('div', { class: 'row', style: { gap: '8px', marginBottom: '12px' } },
       h('button', {
         type: 'button',
         class: 'btn sm',
-        onclick: async () => {
-          testState.textContent = 'Checking source…';
-          try {
-            const r = await fetch('/api/photos/test', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ options: w.options || {} }),
-            });
-            const res = await r.json();
-            testState.textContent = res.message || (res.ok ? 'OK' : 'Source check failed');
-          } catch (_) {
-            testState.textContent = 'Could not reach agent';
-          }
-        }
+        onclick: () => runSourceCheck(false)
       }, 'Test source'),
       testState));
 
     dynamicBox.replaceChildren(...kids);
+
+    if (provider !== 'nextcloud' && !(provider === 'icloud' && (getVal('shareUrl') || '').trim())
+        && !(getVal('albumId') || '').trim() && looksLikeLocalPath(getVal('folder'))
+        && looksLikeCloudSyncedPath(getVal('folder'), provider)) {
+      runSourceCheck(true);
+    }
   };
 
   const providerMeta = optsByKey.provider;

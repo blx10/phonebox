@@ -339,6 +339,7 @@
     { id: 'pictures', name: 'Pictures', providerHint: 'local', path: '~/Pictures/Favorites' },
     { id: 'icloud-pics', name: 'iCloud Photos', providerHint: 'icloud', path: '~/Pictures/iCloud Photos' },
     { id: 'od-pics', name: 'OneDrive › Pictures', providerHint: 'onedrive', path: '~/OneDrive/Pictures' },
+    { id: 'od-cloudonly', name: 'OneDrive › CloudOnly', providerHint: 'onedrive', path: '~/OneDrive/CloudOnly' },
     { id: 'gd-drive', name: 'Google Drive › My Drive', providerHint: 'google', path: '~/Google Drive/My Drive' },
     { id: 'db-cam', name: 'Dropbox › Camera Uploads', providerHint: 'dropbox', path: '~/Dropbox/Camera Uploads' },
   ];
@@ -374,6 +375,13 @@
         photos: [] };
     }
     const sourceLabel = opts.folder || (provider === 'icloud' ? 'iCloud Shared Album' : provider === 'nextcloud' ? 'Nextcloud Share' : provider);
+    if (/CloudOnly/i.test(opts.folder || '') && opts.downloadCloudFiles !== true) {
+      return {
+        configured: true, provider, sourceLabel, title: opts.title || null, updatedAt: now(), stale: false,
+        error: '3 cloud-only photos were not downloaded. Enable "Download cloud-only files on demand" in PhoneBox Settings to allow cloud downloads.',
+        photos: [], cloudOnlyCount: 3,
+      };
+    }
     const items = DEMO_PHOTOS.map((p) => ({
       id: p.id, url: `/api/photos/image/${p.id}`, caption: p.caption, takenAt: p.takenAt,
       album: p.album, source: sourceLabel, width: 800, height: 500,
@@ -381,7 +389,8 @@
     if (opts.order === 'newest') items.sort((a, b) => b.takenAt - a.takenAt);
     else if (opts.order === 'oldest') items.sort((a, b) => a.takenAt - b.takenAt);
     else if (opts.order === 'name') items.sort((a, b) => a.caption.localeCompare(b.caption));
-    return { configured: true, provider, sourceLabel, title: opts.title || null, updatedAt: now(), stale: false, error: null, photos: items };
+    const cloudOnlyCount = /CloudOnly/i.test(opts.folder || '') ? 3 : 0;
+    return { configured: true, provider, sourceLabel, title: opts.title || null, updatedAt: now(), stale: false, error: null, photos: items, cloudOnlyCount };
   }
 
   // ---- router
@@ -628,9 +637,15 @@
       });
     }
     if (path === '/api/photos/test' && method === 'POST') {
-      const feed = demoPhotoFeed((parse(body) || {}).options || {});
-      return json(feed.configured ? { ok: true, message: `Found ${feed.photos.length} photos in ${feed.sourceLabel}`, count: feed.photos.length, sourceLabel: feed.sourceLabel }
-        : { ok: false, message: feed.error, count: 0, sourceLabel: '' });
+      const opts = (parse(body) || {}).options || {};
+      const feed = demoPhotoFeed(opts);
+      const cloudCount = feed.cloudOnlyCount || 0;
+      if (!feed.configured) return json({ ok: false, message: feed.error, count: 0, sourceLabel: '', cloudOnlyCount: 0 });
+      if (feed.error) return json({ ok: false, message: feed.error, count: 0, sourceLabel: feed.sourceLabel, cloudOnlyCount: cloudCount });
+      const msg = cloudCount > 0 && opts.downloadCloudFiles
+        ? `Found ${feed.photos.length} photos in ${feed.sourceLabel} (${cloudCount} in cloud — photos will be downloaded onto this computer as they are shown)`
+        : `Found ${feed.photos.length} photos in ${feed.sourceLabel}`;
+      return json({ ok: true, message: msg, count: feed.photos.length, sourceLabel: feed.sourceLabel, cloudOnlyCount: cloudCount });
     }
     if (path.startsWith('/api/photos/image/')) {
       const id = decodeURIComponent(path.slice('/api/photos/image/'.length));
