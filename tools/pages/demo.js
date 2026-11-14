@@ -178,8 +178,17 @@
         ramUsedGb: wave(120, 21, 24), ramTotalGb: 64, netDownBps: Math.max(0, wave(23, 0.2e6, 9e6, 0, 1e6)), netUpBps: Math.max(0, wave(17, 40e3, 600e3, 1, 50e3)),
         uptimeSec: 3 * 86400 + 5 * 3600 + Math.floor((now() - START) / 1000),
         disks: [{ name: 'C:', usedGb: 612, totalGb: 1000 }, { name: 'D:', usedGb: 1450, totalGb: 2000 }, { name: 'E:', usedGb: 310, totalGb: 4000 }],
-        gpu: { name: 'NVIDIA GeForce RTX 4080', util: Math.max(0, wave(29, 4, 38, 2, 4)), temp: wave(50, 46, 61), power: wave(29, 38, 140, 2),
-          powerLimit: 320, clock: 2520, fan: 34, vramUsed: 5.8, vramTotal: 16 },
+        ...(() => {
+          const gpus = [
+            { name: 'NVIDIA GeForce RTX 4080', util: Math.max(0, wave(29, 4, 38, 2, 4)), temp: wave(50, 46, 61), power: wave(29, 38, 140, 2),
+              powerLimit: 320, clock: 2520, fan: 34, vramUsed: 5.8, vramTotal: 16, vendor: 'nvidia', source: 'nvidia-smi+windows', integrated: false,
+              memClock: 11201, sharedUsed: 0.3, sharedTotal: 31.9, powerPct: null, fanRpm: 1180, tempMax: 90, driver: '596.36', hotSpot: null, memTemp: null },
+            { name: 'AMD Radeon(TM) Graphics', util: Math.max(0, wave(41, 0, 6, 0, 1)), temp: wave(60, 50, 58), power: null, powerLimit: null,
+              vramUsed: 0.1, vramTotal: 0.5, fan: null, clock: null, vendor: 'amd', source: 'windows', integrated: true, memClock: 2400,
+              sharedUsed: 0.2, sharedTotal: 31.9, powerPct: wave(37, 6, 14), fanRpm: null, tempMax: null, driver: '32.0.21045.11001', hotSpot: null, memTemp: null },
+          ];
+          return { gpu: gpus[0], gpus };
+        })(),
       },
       media: { app: 'Spotify', title, artist, album, durMs: dur, posMs: position(), playing: player.playing, canSeek: true, artId: player.track + 1 },
       audio: { ...audio },
@@ -492,8 +501,8 @@
     if (path === '/api/docker') return json({ ...docker(), control: allows(await config(), (t) => t === 'docker') });
     if (path === '/api/obs') { const c = await config(); return json({ ...obsState(), enabled: c.obs?.enabled !== false, control: widgets(c).some((w) => w.type === 'obs' && w.options?.control === true) }); }
     if (path === '/api/phones') return json([
-      { id: '3f9a1c0d7b2e', model: 'UMIDIGI BISON', lastSeen: now() - 2000, via: 'USB', name: null, pages: null },
-      { id: 'c81e728d9d4c', model: 'samsung SM-X200', lastSeen: now() - 140000, via: 'Wi-Fi', name: null, pages: null },
+      { id: '3f9a1c0d7b2e', model: 'UMIDIGI BISON', lastSeen: now() - 2000, via: 'USB', webView: 'com.google.android.webview/134.0.6998.135', webviewProblem: null, name: null, pages: null },
+      { id: 'c81e728d9d4c', model: 'samsung SM-X200', lastSeen: now() - 140000, via: 'Wi-Fi', webView: 'com.google.android.webview/134.0.6998.135', webviewProblem: null, name: null, pages: null },
     ]);
     if (path === '/api/batteries') return json({ devices: [
       { name: 'WH-1000XM5', level: 64, kind: 'headphones', charging: null },
@@ -581,7 +590,7 @@
       }
       return json(await config(), 200, { 'X-Config-Version': String(cfgVersion()) });
     }
-    if (path === '/api/info') return json({ version: VERSION, os: 'windows', configPath: 'browser storage (demo)', logPath: '—', adb: 'demo', connected: true, devices: ['DEMO0001'], appMissing: [], usbProblem: null });
+    if (path === '/api/info') return json({ version: VERSION, os: 'windows', configPath: 'browser storage (demo)', logPath: '—', adb: 'demo', connected: true, devices: ['DEMO0001'], appMissing: [], usbProblem: null, webviewProblem: null });
     if (path === '/api/lan') return json({ configured: true, active: true, port: 8766, restartNeeded: false, hosts: ['192.168.1.20', '100.101.102.103'], fingerprint: 'demo' });
     if (path === '/api/update') return json({ status: { agentVersion: VERSION, appVersion: VERSION, latest: VERSION, releaseUrl: 'https://github.com/ersinkoc/phonebox/releases/latest', agentUpdate: false, appUpdate: false,
       lastCheck: now() - 3600e3, state: 'idle', error: null }, auto: (await config()).updates?.auto !== false, installed: true });
