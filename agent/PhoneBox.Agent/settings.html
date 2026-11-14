@@ -433,14 +433,15 @@ dd { margin: 0; word-break: break-all; }
 
       <div class="card" id="speechSettingsCard">
         <h3>Speech to text</h3>
-        <p class="hint" id="speechSetupBanner" style="margin:0 0 12px">Dictate from the panel using macOS Apple Speech Recognition.</p>
+        <p class="hint" id="speechSetupBanner" style="margin:0 0 12px">Dictate from the panel using macOS Apple Speech Recognition or optional OpenAI Audio.</p>
         <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" data-bind="speech.enabled"><span></span></label> Enable Speech to text</div>
         <p class="hint" style="margin:0 0 12px">Dictated transcripts and Note updates appear on an always-on desk screen; keep disabled or restrict widget control when unattended and avoid dictating secrets.</p>
         <div class="grid2">
           <div class="field"><label>Default provider</label>
             <select data-bind="speech.provider" id="speechProvider">
-              <option value="auto">Auto (Apple Speech on macOS)</option>
+              <option value="auto">Auto (Apple Speech › OpenAI)</option>
               <option value="apple">Apple Speech Recognition (macOS)</option>
+              <option value="openai">OpenAI Audio (Whisper / GPT-4o Transcribe)</option>
             </select></div>
           <div class="field"><label>Default language (blank = auto, e.g. en-US, tr-TR)</label>
             <input type="text" data-bind="speech.language" placeholder="en-US" spellcheck="false"></div>
@@ -450,6 +451,15 @@ dd { margin: 0; word-break: break-all; }
             <input type="number" min="5" max="600" data-bind="speech.maxRecordSec" data-type="int"></div>
           <div class="row" style="padding-top:10px"><label class="switch"><input type="checkbox" data-bind="speech.appleOnDevice"><span></span></label> Apple Speech: require on-device recognition</div>
         </div>
+
+        <details style="margin:8px 0 12px">
+          <summary style="cursor:pointer;font-weight:600;color:var(--muted)">Cloud STT provider credentials (optional — API keys stay on this PC)</summary>
+          <p class="hint" style="margin:8px 0">API keys are stored only on this PC in <code>config.json</code> (plain JSON under <code>%APPDATA%\PhoneBox</code> on Windows, or <code>0600</code> on macOS/Linux) and are never sent to the phone.</p>
+          <div class="grid2">
+            <div class="field"><label>OpenAI API key</label><input type="password" data-bind="speech.openAiApiKey" autocomplete="off"></div>
+            <div class="field"><label>OpenAI model</label><input type="text" data-bind="speech.openAiModel" placeholder="gpt-4o-mini-transcribe" spellcheck="false"></div>
+          </div>
+        </details>
 
         <h4 style="margin:6px 0 8px;font-size:13px">Transcript storage on this computer</h4>
         <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" data-bind="speech.saveTranscripts"><span></span></label> Save transcripts to disk automatically (widgets can override per widget)</div>
@@ -1692,6 +1702,7 @@ function ensureSpeechDefaults() {
   cfg.speech ??= {};
   const defaults = {
     enabled: false, provider: 'auto', language: '', maxRecordSec: 90, appleOnDevice: false,
+    openAiApiKey: '', openAiModel: 'gpt-4o-mini-transcribe',
     saveTranscripts: false, transcriptDir: '', transcriptFormat: 'daily-md', saveAudioCopy: false, historyLimit: 15,
   };
   for (const [k, v] of Object.entries(defaults)) cfg.speech[k] ??= v;

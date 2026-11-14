@@ -217,7 +217,7 @@ public sealed class SpeechTests : IDisposable
     {
         var cfg = new SpeechConfig
         {
-            Provider = "openai", // Stage 1 does not support cloud providers
+            Provider = "unknown-provider",
             MaxRecordSec = 9999,
             HistoryLimit = 0,
             TranscriptFormat = "invalid-format",
@@ -231,6 +231,10 @@ public sealed class SpeechTests : IDisposable
         Assert.Equal(15, cfg.HistoryLimit);
         Assert.Equal("daily-md", cfg.TranscriptFormat);
         Assert.Equal("", cfg.TranscriptDir);
+
+        cfg.Provider = "openai";
+        cfg.Normalize();
+        Assert.Equal("openai", cfg.Provider);
     }
 
     [Fact]
@@ -771,5 +775,217 @@ public sealed class SpeechTests : IDisposable
         Assert.Null(err);
         Assert.False(string.IsNullOrWhiteSpace(exe));
         Assert.True(File.Exists(exe));
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1", false)]
+    [InlineData("::1", false)]
+    [InlineData("::ffff:127.0.0.1", false)]
+    [InlineData("0.0.0.0", false)]
+    [InlineData("10.0.0.5", false)]
+    [InlineData("100.64.0.1", false)]
+    [InlineData("169.254.169.254", false)]
+    [InlineData("172.16.0.1", false)]
+    [InlineData("192.168.1.10", false)]
+    [InlineData("fd00::1", false)]
+    [InlineData("2001:db8::1", false)]
+    [InlineData("1.1.1.1", true)]
+    [InlineData("2606:4700:4700::1111", true)]
+    public void SafeSpeechHttp_IsPublicAddress_FiltersNonPublicAndMappedAddresses(string ipText, bool expectedPublic)
+    {
+        var ip = IPAddress.Parse(ipText);
+        Assert.Equal(expectedPublic, SafeSpeechHttp.IsPublicAddress(ip));
+    }
+
+    [Fact]
+    public async Task SafeSpeechHttp_SelfSsrfToRealKestrel_BlockedDirectAndOnRedirect()
+    {
+        int kestrelHits = 0;
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        app.MapGet("/api/settings", () =>
+        {
+            Interlocked.Increment(ref kestrelHits);
+            return Results.Ok(new { secret = "should-never-reach" });
+        });
+        await app.StartAsync();
+
+        try
+        {
+            var localPort = new Uri(app.Urls.First()).Port;
+            using var safeClient = SafeSpeechHttp.CreateClient(allowLoopback: false, [localPort], TimeSpan.FromSeconds(5));
+
+            // 1) Direct Self-SSRF to local Kestrel agent port must throw before hitting Kestrel
+            await Assert.ThrowsAsync<HttpRequestException>(() =>
+                safeClient.GetAsync($"http://127.0.0.1:{localPort}/api/settings"));
+            Assert.Equal(0, Volatile.Read(ref kestrelHits));
+
+            // 2) Redirect from public origin -> local Kestrel port must be blocked with 0 hits to Kestrel
+            using var redirClient = new HttpClient(new StubHttpHandler(_ =>
+            {
+                var r = new HttpResponseMessage(HttpStatusCode.Redirect);
+                r.Headers.Location = new Uri($"http://127.0.0.1:{localPort}/api/settings");
+                return r;
+            }));
+            await Assert.ThrowsAsync<HttpRequestException>(() =>
+                SafeSpeechHttp.SendWithSafeRedirectsAsync(
+                    redirClient,
+                    (u, _) => new HttpRequestMessage(HttpMethod.Get, u),
+                    new Uri("https://api.openai.com/v1/models"),
+                    allowLoopback: false,
+                    [localPort],
+                    ["api.openai.com"],
+                    CancellationToken.None));
+            Assert.Equal(0, Volatile.Read(ref kestrelHits));
+
+            // 3) Cross-origin 307 POST redirect must be blocked without replaying body
+            var callCount = 0;
+            using var postRedirClient = new HttpClient(new StubHttpHandler(_ =>
+            {
+                callCount++;
+                var r = new HttpResponseMessage(HttpStatusCode.TemporaryRedirect);
+                r.Headers.Location = new Uri("https://evil.example/steal");
+                return r;
+            }));
+            await Assert.ThrowsAsync<HttpRequestException>(() =>
+                SafeSpeechHttp.SendWithSafeRedirectsAsync(
+                    postRedirClient,
+                    (u, _) => new HttpRequestMessage(HttpMethod.Post, u) { Content = new StringContent("audio") },
+                    new Uri("https://api.openai.com/v1/audio/transcriptions"),
+                    allowLoopback: false,
+                    [localPort],
+                    ["api.openai.com"],
+                    CancellationToken.None));
+            Assert.Equal(1, callCount);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task SafeSpeechHttp_CredentialHostsAndBoundedReader_EnforceAllowListAndMaxBytes()
+    {
+        var seenAuth = new List<(Uri Uri, bool HasAuth)>();
+        using var client = new HttpClient(new StubHttpHandler(req =>
+        {
+            seenAuth.Add((req.RequestUri!, req.Headers.Authorization is not null));
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ok\":true}") };
+        }));
+
+        using var okRes = await SafeSpeechHttp.SendWithSafeRedirectsAsync(
+            client,
+            (u, sendAuth) =>
+            {
+                var r = new HttpRequestMessage(HttpMethod.Get, u);
+                if (sendAuth) r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "secret-token");
+                return r;
+            },
+            new Uri("https://api.openai.com/v1/models"),
+            allowLoopback: false,
+            [],
+            ["api.openai.com"],
+            CancellationToken.None);
+        Assert.Equal(HttpStatusCode.OK, okRes.StatusCode);
+
+        using var nonAllowRes = await SafeSpeechHttp.SendWithSafeRedirectsAsync(
+            client,
+            (u, sendAuth) =>
+            {
+                var r = new HttpRequestMessage(HttpMethod.Get, u);
+                if (sendAuth) r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "secret-token");
+                return r;
+            },
+            new Uri("https://other.example/v1/models"),
+            allowLoopback: false,
+            [],
+            ["api.openai.com"],
+            CancellationToken.None);
+        Assert.Equal(HttpStatusCode.OK, nonAllowRes.StatusCode);
+
+        Assert.True(seenAuth[0].HasAuth);
+        Assert.False(seenAuth[1].HasAuth);
+
+        var oversized = new ByteArrayContent(new byte[SafeSpeechHttp.MaxResponseBytes + 64]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            SafeSpeechHttp.ReadBoundedStringAsync(oversized, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task OpenAiProvider_PostsMultipartAudioWithAllowListedAuthAndMasksSecrets()
+    {
+        var secretKey = "sk-openai-very-secret-test-key";
+        var store = CreateStore(new AgentConfig
+        {
+            Speech = new SpeechConfig
+            {
+                Enabled = true,
+                Provider = "auto",
+                OpenAiApiKey = secretKey,
+                OpenAiModel = "gpt-4o-mini-transcribe",
+            },
+            Pages =
+            [
+                new PageConfig
+                {
+                    Id = "home",
+                    Title = "Home",
+                    Enabled = true,
+                    Widgets = [new WidgetConfig { Id = "sp", Type = "speech", Options = new() }],
+                },
+            ],
+        });
+
+        Assert.DoesNotContain(secretKey, JsonSerializer.Serialize(store.Get().ToPublic(), ConfigStore.WriteOpts));
+
+        string? capturedAuth = null;
+        string? capturedBody = null;
+        Uri? capturedUri = null;
+        var wavPath = Path.Combine(_dir, "openai-sample.wav");
+        await File.WriteAllBytesAsync(wavPath, BuildTestWav(800));
+
+        var appleMock = new FakeAppleClient { IsSupported = false };
+        var svc = new SpeechService(
+            store,
+            CreatePushStore(),
+            new AgentEndpoint(),
+            appleMock,
+            new FakeCapture(),
+            tempRoot: _dir,
+            rateLimiter: new SpeechRateLimiter(100, TimeSpan.FromSeconds(1)),
+            httpFactory: (_, _, _) => new HttpClient(new StubHttpHandler(req =>
+            {
+                capturedUri = req.RequestUri;
+                capturedAuth = req.Headers.Authorization?.ToString();
+                capturedBody = req.Content?.ReadAsStringAsync().GetAwaiter().GetResult();
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("{\"text\":\"Hello from OpenAI\"}", Encoding.UTF8, "application/json"),
+                };
+            })));
+
+        var (resolved, err) = svc.ResolveProvider(store.Get().Speech!, SpeechWidgetSettings.Parse(null));
+        Assert.Null(err);
+        Assert.Equal("openai", resolved);
+
+        var text = await svc.TranscribeWithProviderAsync("openai", wavPath, "en-US", store.Get().Speech!, CancellationToken.None);
+        Assert.Equal("Hello from OpenAI", text);
+        Assert.Equal("https://api.openai.com/v1/audio/transcriptions", capturedUri?.ToString());
+        Assert.Equal($"Bearer {secretKey}", capturedAuth);
+        Assert.Contains("gpt-4o-mini-transcribe", capturedBody ?? "");
+        Assert.Contains("en", capturedBody ?? "");
+
+        var sanitized = SpeechService.SanitizePhoneError($"Unauthorized with {secretKey} at /Users/alper/secret.wav", store.Get().Speech!);
+        Assert.DoesNotContain(secretKey, sanitized);
+        Assert.DoesNotContain("/Users/alper", sanitized);
+        Assert.Contains("***", sanitized);
+    }
+
+    private sealed class StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(responder(request));
     }
 }

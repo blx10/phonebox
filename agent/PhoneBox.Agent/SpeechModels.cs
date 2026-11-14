@@ -4,10 +4,10 @@ using System.Text.Json.Serialization;
 
 namespace PhoneBox.Agent;
 
-/// <summary>Global settings for the Speech to text widget, local providers, and transcript disk logging.</summary>
+/// <summary>Global settings for the Speech to text widget, speech providers, and transcript disk logging.</summary>
 public sealed class SpeechConfig
 {
-    public static readonly string[] ValidProviders = ["auto", "apple"];
+    public static readonly string[] ValidProviders = ["auto", "apple", "openai"];
     public static readonly string[] ValidTranscriptFormats = ["daily-md", "daily-txt", "single-md", "per-item-txt", "jsonl"];
 
     public bool Enabled { get; set; }
@@ -15,6 +15,9 @@ public sealed class SpeechConfig
     public string Language { get; set; } = "";
     public int MaxRecordSec { get; set; } = 90;
     public bool AppleOnDevice { get; set; }
+
+    public string OpenAiApiKey { get; set; } = "";
+    public string OpenAiModel { get; set; } = "gpt-4o-mini-transcribe";
 
     public bool SaveTranscripts { get; set; }
     public string TranscriptDir { get; set; } = "";
@@ -28,9 +31,17 @@ public sealed class SpeechConfig
         Language = TrimMax(Language, 24);
         MaxRecordSec = Math.Clamp(MaxRecordSec == 0 ? 90 : MaxRecordSec, 5, 600);
 
+        OpenAiApiKey = TrimMax(OpenAiApiKey, 512);
+        OpenAiModel = DefaultIfEmpty(TrimMax(OpenAiModel, 128), "gpt-4o-mini-transcribe");
+
         TranscriptDir = CleanPathField(TranscriptDir, 512);
         TranscriptFormat = NormalizeEnum(TranscriptFormat, ValidTranscriptFormats, "daily-md");
         HistoryLimit = Math.Clamp(HistoryLimit == 0 ? 15 : HistoryLimit, 1, 50);
+    }
+
+    internal IEnumerable<string?> EnumerateSecrets()
+    {
+        yield return OpenAiApiKey;
     }
 
     internal static string NormalizeEnum(string? value, string[] allowed, string fallback)
@@ -69,7 +80,7 @@ public sealed record SpeechWidgetSettings(
     bool Control,
     string TranscriptDir = "")
 {
-    public static readonly string[] ValidWidgetProviders = ["default", "auto", "apple"];
+    public static readonly string[] ValidWidgetProviders = ["default", "auto", "apple", "openai"];
     public static readonly string[] ValidModes = ["toggle", "hold"];
     public static readonly string[] ValidNoteModes = ["append", "prepend", "bullet", "timestamp", "replace"];
     public static readonly string[] ValidSavePolicies = ["default", "always", "never"];
