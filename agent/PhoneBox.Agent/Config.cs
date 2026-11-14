@@ -29,6 +29,8 @@ public sealed class AgentConfig
     public HomeAssistantConfig HomeAssistant { get; set; } = new();
     /// <summary>OBS Studio's WebSocket server (obs-websocket 5).</summary>
     public ObsConfig Obs { get; set; } = new();
+    /// <summary>Speech to text providers, API credentials, and transcript disk logging (never goes to the phone).</summary>
+    public SpeechConfig Speech { get; set; } = new();
 
     /// <summary>The pages a phone shows: its own selection (Settings › Phones), or all of them.</summary>
     public IEnumerable<PageConfig> PagesFor(string? deviceId)
@@ -53,7 +55,7 @@ public sealed class AgentConfig
             {
                 w.Id, w.Type, w.X, w.Y, w.W, w.H, w.Appearance,
                 // command widgets: only what the panel shows; the scripts (command, commandUnix, …) stay on this computer
-                options = StackWidgets.PublicOptions(w),
+                options = SpeechWidgetSettings.ScrubPublicWidget(w, StackWidgets.PublicOptions(w)),
             }),
         }),
         shortcuts = Shortcuts.Select(s => new { s.Id, s.Label, s.Icon, s.Color, toggle = s.Toggle || s.Cmd == "builtin:mute" }),
@@ -466,6 +468,8 @@ public sealed partial class ConfigStore(string path)
         c.Obs ??= new();
         if (string.IsNullOrWhiteSpace(c.Obs.Url)) c.Obs.Url = "ws://127.0.0.1:4455";
         c.HomeAssistant ??= new();
+        c.Speech ??= new();
+        c.Speech.Normalize();
         c.HomeAssistant.Url = string.IsNullOrWhiteSpace(c.HomeAssistant.Url) ? null : c.HomeAssistant.Url.Trim().TrimEnd('/');
         c.HomeAssistant.Token = string.IsNullOrWhiteSpace(c.HomeAssistant.Token) ? null : c.HomeAssistant.Token.Trim();
         c.Calendars = (c.Calendars ?? []).Where(x => x is not null).Take(20).ToList();
@@ -547,6 +551,7 @@ public sealed partial class ConfigStore(string path)
                 var wu = wid;
                 for (var i = 2; !widgetIds.Add(wu); i++) wu = $"{wid}-{i}";
                 w.Id = wu;
+                SpeechWidgetSettings.NormalizeWidget(w);
                 widgets.Add(w);
             }
             p.Widgets = widgets;

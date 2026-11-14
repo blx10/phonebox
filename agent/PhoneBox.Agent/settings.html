@@ -431,6 +431,48 @@ dd { margin: 0; word-break: break-all; }
         <div class="row"><button class="btn sm" id="obsTest">Test</button><span class="hint" id="obsState"></span></div>
       </div>
 
+      <div class="card" id="speechSettingsCard">
+        <h3>Speech to text</h3>
+        <p class="hint" id="speechSetupBanner" style="margin:0 0 12px">Dictate from the panel using macOS Apple Speech Recognition.</p>
+        <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" data-bind="speech.enabled"><span></span></label> Enable Speech to text</div>
+        <p class="hint" style="margin:0 0 12px">Dictated transcripts and Note updates appear on an always-on desk screen; keep disabled or restrict widget control when unattended and avoid dictating secrets.</p>
+        <div class="grid2">
+          <div class="field"><label>Default provider</label>
+            <select data-bind="speech.provider" id="speechProvider">
+              <option value="auto">Auto (Apple Speech on macOS)</option>
+              <option value="apple">Apple Speech Recognition (macOS)</option>
+            </select></div>
+          <div class="field"><label>Default language (blank = auto, e.g. en-US, tr-TR)</label>
+            <input type="text" data-bind="speech.language" placeholder="en-US" spellcheck="false"></div>
+        </div>
+        <div class="grid2" style="align-items:center">
+          <div class="field"><label>Max recording seconds (5 – 600)</label>
+            <input type="number" min="5" max="600" data-bind="speech.maxRecordSec" data-type="int"></div>
+          <div class="row" style="padding-top:10px"><label class="switch"><input type="checkbox" data-bind="speech.appleOnDevice"><span></span></label> Apple Speech: require on-device recognition</div>
+        </div>
+
+        <h4 style="margin:6px 0 8px;font-size:13px">Transcript storage on this computer</h4>
+        <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" data-bind="speech.saveTranscripts"><span></span></label> Save transcripts to disk automatically (widgets can override per widget)</div>
+        <div class="grid2">
+          <div class="field"><label>Transcript folder</label>
+            <div class="row" style="gap:6px">
+              <input type="text" id="speechTranscriptDir" data-bind="speech.transcriptDir" placeholder="Default: Documents/PhoneBox/Transcripts" spellcheck="false" style="flex:1">
+              <button type="button" class="btn sm" id="speechBrowseDir">Browse…</button>
+              <button type="button" class="btn sm" id="speechDefaultDir">Default</button>
+            </div></div>
+          <div class="field"><label>Transcript file format</label>
+            <select data-bind="speech.transcriptFormat">
+              <option value="daily-md">Daily Markdown (YYYY-MM-DD.md)</option>
+              <option value="daily-txt">Daily plain text (YYYY-MM-DD.txt)</option>
+              <option value="single-md">Single Markdown log (transcripts.md)</option>
+              <option value="per-item-txt">One .txt file per dictation</option>
+              <option value="jsonl">Structured JSONL (transcripts.jsonl)</option>
+            </select></div>
+        </div>
+        <div class="row" style="margin-bottom:12px"><label class="switch"><input type="checkbox" data-bind="speech.saveAudioCopy"><span></span></label> Also save a .wav recording copy in an <code>audio/</code> subfolder</div>
+        <div class="row"><button type="button" class="btn sm" id="speechTest">Test active provider</button><button type="button" class="btn sm" id="speechRefreshStatus">Check local tools</button><span class="hint" id="speechState"></span></div>
+      </div>
+
       <div class="card">
         <h3>Night mode</h3>
         <div class="row" style="margin-bottom:12px"><label class="switch"><input type="checkbox" data-bind="night.enabled"><span></span></label> Dim the screen at night and show only the clock</div>
@@ -1276,11 +1318,121 @@ function optionField(w, o, onValChange) {
   if (o.type === 'stack-widgets' || (w.type === 'stack' && o.key === 'widgets')) {
     return renderStackWidgetsOption(w, o);
   }
-  const v = optVal(w, o);
   const set = (key, val) => {
     if (onValChange) { w.options = w.options || {}; w.options[key] = val; onValChange(key, val); }
     else setWOpt(w, key, val);
   };
+  if (w.type === 'speech' && o.key === 'noteTarget') {
+    const curVal = String(optVal(w, o) ?? '');
+    const choices = [
+      ['', 'None (no Note target)'],
+      ['first', 'Nearest Note widget (same page first)'],
+    ];
+    for (const pg of cfg.pages || []) {
+      const pName = pg.title || pg.id;
+      for (const pw of pg.widgets || []) {
+        if (pw.type === 'note') {
+          const snippet = String(pw.options?.text || '').replace(/\s+/g, ' ').trim().slice(0, 28);
+          choices.push([`${pg.id}/${pw.id}`, `${pName} › Note${snippet ? ' (' + snippet + ')' : ''}`]);
+        } else if (pw.type === 'stack' && Array.isArray(pw.options?.widgets)) {
+          pw.options.widgets.forEach((cw, ci) => {
+            if (cw?.type === 'note' && cw.enabled !== false && cw.active !== false) {
+              const cid = cw.id || ('card-' + ci);
+              const snippet = String(cw.options?.text || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+              choices.push([`${pg.id}/${pw.id}:${cid}`, `${pName} › Stack › Note${snippet ? ' (' + snippet + ')' : ''}`]);
+            }
+          });
+        }
+      }
+    }
+    if (curVal && !choices.some(([k]) => k === curVal)) {
+      choices.push([curVal, `Custom / saved: ${curVal}`]);
+    }
+    return h('div', { class: 'field' },
+      h('label', {}, o.label),
+      h('select', { onchange: (e) => set(o.key, e.target.value) },
+        ...choices.map(([k, l]) => h('option', { value: k, selected: k === curVal }, l))));
+  }
+  if (w.type === 'speech' && o.key === 'saveTranscript') {
+    const v = optVal(w, o);
+    const sel = h('select', {
+      onchange: (e) => {
+        set(o.key, e.target.value);
+        speechInspectorHooks.get(w)?.refreshHint?.();
+      },
+    }, ...o.choices.map(([k, l]) => h('option', { value: k, selected: k === v }, l)));
+    const entry = speechInspectorHooks.get(w) || {};
+    entry.setPolicySelect = (nextVal) => { sel.value = nextVal; };
+    speechInspectorHooks.set(w, entry);
+    return h('div', { class: 'field' }, h('label', {}, o.label), sel);
+  }
+  if (w.type === 'speech' && o.key === 'transcriptDir') {
+    if (!speechDefaultTranscriptDir) loadSpeechSetupStatus();
+    const curVal = String(optVal(w, o) ?? '');
+    const input = h('input', {
+      type: 'text',
+      value: curVal,
+      spellcheck: 'false',
+      style: { flex: '1', minWidth: '0' },
+    });
+    const hintEl = h('div', { class: 'hint sp-save-dest-hint', style: { marginTop: '4px', wordBreak: 'break-all' } });
+    const refreshHint = () => {
+      const globalDir = (cfg?.speech?.transcriptDir || '').trim() || speechDefaultTranscriptDir || '~/Documents/PhoneBox/Transcripts';
+      input.placeholder = 'Settings default: ' + globalDir;
+      const policy = String(optVal(w, { key: 'saveTranscript', default: 'default' }) || 'default');
+      const globalSave = !!cfg?.speech?.saveTranscripts;
+      const savingOn = policy === 'always' || (policy === 'default' && globalSave);
+      const effDir = ((input.value || '').trim() || globalDir).replace(/[\\/]+$/, '');
+      const pat = speechFormatExample(cfg?.speech?.transcriptFormat || 'daily-md');
+      if (policy === 'never') {
+        hintEl.textContent = 'PC file saving is off ("Never save").';
+      } else if (!savingOn) {
+        hintEl.textContent = `PC file saving is off (Settings default is off). Choose "Always save" above or Browse to save into: ${effDir}/${pat}`;
+      } else {
+        hintEl.textContent = `Saves on PC to: ${effDir}/${pat}`;
+      }
+    };
+    input.oninput = () => {
+      set('transcriptDir', input.value.trim());
+      refreshHint();
+    };
+    const browseBtn = h('button', {
+      type: 'button',
+      class: 'btn sm',
+      onclick: () => openSpeechDirBrowser(
+        input.value.trim() || cfg?.speech?.transcriptDir || speechDefaultTranscriptDir || '',
+        (picked) => {
+          input.value = picked;
+          set('transcriptDir', picked);
+          const curPolicy = String(optVal(w, { key: 'saveTranscript', default: 'default' }) || 'default');
+          if (curPolicy === 'never' || (curPolicy === 'default' && !cfg?.speech?.saveTranscripts)) {
+            set('saveTranscript', 'always');
+            speechInspectorHooks.get(w)?.setPolicySelect?.('always');
+          }
+          refreshHint();
+        }
+      ),
+    }, 'Browse…');
+    const defaultBtn = h('button', {
+      type: 'button',
+      class: 'btn sm',
+      onclick: () => {
+        input.value = '';
+        set('transcriptDir', '');
+        refreshHint();
+      },
+    }, 'Default');
+    const entry = speechInspectorHooks.get(w) || {};
+    entry.refreshHint = refreshHint;
+    speechInspectorHooks.set(w, entry);
+    speechInspectorRefreshers.add({ el: hintEl, fn: refreshHint });
+    refreshHint();
+    return h('div', { class: 'field sp-dir-field' },
+      h('label', {}, o.label),
+      h('div', { class: 'row', style: { display: 'flex', gap: '6px', alignItems: 'center' } }, input, browseBtn, defaultBtn),
+      hintEl);
+  }
+  const v = optVal(w, o);
   const field = (...kids) => h('div', { class: 'field' }, h('label', {}, o.label), ...kids);
   switch (o.type) {
     case 'bool':
@@ -1535,6 +1687,142 @@ $('obsTest').onclick = async () => {
     const r = await (await fetch('/api/obs-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg.obs || {}) })).json();
     $('obsState').textContent = r.result;
   } catch (_) { $('obsState').textContent = 'Could not check'; }
+};
+function ensureSpeechDefaults() {
+  cfg.speech ??= {};
+  const defaults = {
+    enabled: false, provider: 'auto', language: '', maxRecordSec: 90, appleOnDevice: false,
+    saveTranscripts: false, transcriptDir: '', transcriptFormat: 'daily-md', saveAudioCopy: false, historyLimit: 15,
+  };
+  for (const [k, v] of Object.entries(defaults)) cfg.speech[k] ??= v;
+}
+
+let speechDefaultTranscriptDir = '';
+const speechInspectorHooks = new WeakMap();
+const speechInspectorRefreshers = new Set();
+
+function speechFormatExample(fmt) {
+  switch (fmt) {
+    case 'daily-txt': return 'YYYY-MM-DD.txt';
+    case 'single-md': return 'transcripts.md';
+    case 'per-item-txt': return '<timestamp>.txt';
+    case 'jsonl': return 'transcripts.jsonl';
+    default: return 'YYYY-MM-DD.md';
+  }
+}
+
+function refreshAllSpeechInspectorHints() {
+  for (const item of [...speechInspectorRefreshers]) {
+    if (!item.el.isConnected) {
+      speechInspectorRefreshers.delete(item);
+      continue;
+    }
+    try { item.fn(); } catch (_) {}
+  }
+}
+
+async function loadSpeechSetupStatus() {
+  const el = $('speechSetupBanner');
+  try {
+    const s = await (await fetch('/api/speech/setup-status')).json();
+    if (s.defaultTranscriptDir) speechDefaultTranscriptDir = s.defaultTranscriptDir;
+    const dirInput = $('speechTranscriptDir');
+    if (dirInput && s.defaultTranscriptDir) dirInput.placeholder = 'Default: ' + s.defaultTranscriptDir;
+    refreshAllSpeechInspectorHints();
+    if (!el) return;
+    const parts = [];
+    if (s.appleSupported) {
+      const a = s.appleStatus;
+      parts.push(a?.available
+        ? `Apple Speech: ready (speech=${a.speechAuth}, mic=${a.micAuth}${a.onDeviceSupported ? ', on-device supported' : ''})`
+        : `Apple Speech: ${a?.error || 'needs permission / setup'}`);
+    } else {
+      parts.push(`Platform: ${s.platform}`);
+    }
+    parts.push(`Mic capture: ${s.micCaptureAvailable ? 'available' : 'missing'}`);
+    if (s.ffmpegFound) parts.push('ffmpeg: found');
+    el.textContent = parts.join(' · ');
+  } catch (_) {}
+}
+
+async function openSpeechDirBrowser(startPath, onSelect = null) {
+  const renderDirModal = (res) => {
+    const body = $('modalBody');
+    const cur = res.currentPath || '';
+    const applyDir = (pathVal) => {
+      if (typeof onSelect === 'function') {
+        onSelect(pathVal);
+        closeModal();
+        return;
+      }
+      ensureSpeechDefaults();
+      cfg.speech.transcriptDir = pathVal;
+      if ($('speechTranscriptDir')) $('speechTranscriptDir').value = pathVal;
+      changed();
+      refreshAllSpeechInspectorHints();
+      closeModal();
+    };
+    const presetsRow = h('div', { class: 'presets', style: { marginBottom: '10px' } },
+      ...(res.presets || []).map((p) => h('button', { type: 'button', class: 'btn sm', onclick: () => navigate(p.path) }, p.name)));
+    const upBtn = res.parentPath
+      ? h('button', { type: 'button', class: 'btn sm', onclick: () => navigate(res.parentPath) }, '↑ Up')
+      : null;
+    const statusPill = h('span', { class: 'hint' }, res.writable ? 'Writable folder' : (res.error || 'Protected or read-only'));
+    const list = h('div', { style: { maxHeight: '240px', overflowY: 'auto', border: '1px solid var(--line)', borderRadius: '8px', padding: '6px', display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '10px' } },
+      ...(res.entries || []).length
+        ? res.entries.map((d) => h('button', { type: 'button', class: 'btn sm', style: { justifyContent: 'flex-start', textAlign: 'left' }, onclick: () => navigate(d.path) }, '📁 ' + d.name))
+        : [h('div', { class: 'hint', style: { padding: '8px' } }, 'No subfolders here')]);
+    body.replaceChildren(
+      h('h3', { style: { marginTop: 0 } }, 'Select transcript folder'),
+      presetsRow,
+      h('div', { class: 'row', style: { gap: '8px', marginBottom: '8px' } },
+        upBtn,
+        h('code', { style: { flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, cur),
+        statusPill),
+      list,
+      h('div', { class: 'row', style: { justifyContent: 'flex-end', gap: '8px' } },
+        h('button', { type: 'button', class: 'btn pri', onclick: () => applyDir(cur) }, 'Select this folder')));
+    $('modal').hidden = false;
+  };
+  const navigate = async (path) => {
+    try {
+      const r = await fetch('/api/speech/browse-dirs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: path || '' }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      renderDirModal(await r.json());
+    } catch (_) {
+      toast('Could not browse folders', true);
+    }
+  };
+  await navigate(startPath);
+}
+
+$('speechTest').onclick = async () => {
+  $('speechState').textContent = 'testing…';
+  try {
+    ensureSpeechDefaults();
+    const r = await (await fetch('/api/speech/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: cfg.speech }),
+    })).json();
+    $('speechState').textContent = (r.ok ? '✓ ' : '⚠ ') + (r.message || r.provider);
+  } catch (_) {
+    $('speechState').textContent = 'Could not check provider';
+  }
+};
+$('speechRefreshStatus').onclick = loadSpeechSetupStatus;
+$('speechBrowseDir').onclick = () => openSpeechDirBrowser(cfg?.speech?.transcriptDir || '');
+$('speechDefaultDir').onclick = () => {
+  ensureSpeechDefaults();
+  cfg.speech.transcriptDir = '';
+  if ($('speechTranscriptDir')) $('speechTranscriptDir').value = '';
+  changed();
+  refreshAllSpeechInspectorHints();
+  toast('Using default transcript folder');
 };
 $('calAdd').onclick = () => {
   cfg.calendars ??= [];
@@ -2264,6 +2552,7 @@ function bindForm() {
       setPath(cfg, p, val);
       $('nbv').textContent = Math.round(cfg.night.brightness * 100) + '%';
       if (p === 'charge.method') renderCharge();
+      if (p.startsWith('speech.')) refreshAllSpeechInspectorHints();
       changed();
     };
   });
@@ -2358,8 +2647,9 @@ async function load() {
   cfg.codexBar ??= { providers: ['claude', 'codex', 'antigravity'], rotate: true, pageSize: 2, rotateInterval: 8 };
   for (const [k, v] of Object.entries({ hour12: false, idleReturnSec: 90, switchCountdownSec: 3, touchGraceSec: 20, minDwellSec: 15, holdMaxMin: 30, keepAwake: true })) cfg.display[k] ??= v;
   cfg.charge ??= { enabled: false, min: 50, max: 80, method: 'ha' };
+  ensureSpeechDefaults();
   saved = JSON.stringify(cfg);
-  renderPages(); renderDeck(); renderRules(); renderCalendars(); renderCharge(); bindForm(); changed(); loadInfo(); loadPhones();
+  renderPages(); renderDeck(); renderRules(); renderCalendars(); renderCharge(); bindForm(); changed(); loadInfo(); loadPhones(); loadSpeechSetupStatus();
 }
 
 async function save() {
@@ -2374,7 +2664,7 @@ async function save() {
 }
 
 $('save').onclick = save;
-$('revert').onclick = () => { cfg = JSON.parse(saved); renderPages(); renderDeck(); renderRules(); renderCalendars(); renderPhones(); renderCharge(); bindForm(); changed(); };
+$('revert').onclick = () => { cfg = JSON.parse(saved); ensureSpeechDefaults(); renderPages(); renderDeck(); renderRules(); renderCalendars(); renderPhones(); renderCharge(); bindForm(); changed(); };
 $('openPhone').onclick = async () => { await fetch('/api/phone/open', { method: 'POST' }); toast('Opening the panel on the phone'); };
 $('cityBtn').onclick = searchCity;
 function renderUpdate(u) {
@@ -2433,7 +2723,7 @@ $('whClear').onclick = async () => { if (!confirm('Delete all pushed values?')) 
 setInterval(loadPushed, 4000);
 $('citySearch').onkeydown = (e) => { if (e.key === 'Enter') searchCity(); };
 $('applyJson').onclick = () => {
-  try { cfg = JSON.parse($('json').value); $('jsonErr').textContent = ''; renderPages(); renderDeck(); renderRules(); renderCalendars(); renderPhones(); renderCharge(); bindForm(); changed(); toast('JSON loaded into the form — remember to save'); }
+  try { cfg = JSON.parse($('json').value); ensureSpeechDefaults(); $('jsonErr').textContent = ''; renderPages(); renderDeck(); renderRules(); renderCalendars(); renderPhones(); renderCharge(); bindForm(); changed(); toast('JSON loaded into the form — remember to save'); }
   catch (e) { $('jsonErr').textContent = e.message; }
 };
 document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); if (!$('save').disabled) save(); } });

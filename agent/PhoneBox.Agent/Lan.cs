@@ -80,7 +80,9 @@ public static class Lan
         || path.StartsWithSegments("/api/state") || path.StartsWithSegments("/api/config") || path.StartsWithSegments("/api/art")
         || path.StartsWithSegments("/api/media") || path.StartsWithSegments("/api/volume") || path.StartsWithSegments("/api/quotas")
         || path.StartsWithSegments("/api/work") || path.StartsWithSegments("/api/procs") || path.StartsWithSegments("/api/run")
-        || path.StartsWithSegments("/api/widget") || path.StartsWithSegments("/api/calendar") || path.StartsWithSegments("/api/docker") || path.StartsWithSegments("/api/obs") || path.StartsWithSegments("/api/batteries") || path.StartsWithSegments("/api/ha/states") || path.StartsWithSegments("/api/ha/toggle") || path.StartsWithSegments("/api/approvals") || path.StartsWithSegments("/api/rules/pause") || path.StartsWithSegments("/api/phone/battery") || path.StartsWithSegments("/api/stream") || IsWebhook(path);
+        || path.StartsWithSegments("/api/widget") || path.StartsWithSegments("/api/calendar") || path.StartsWithSegments("/api/docker") || path.StartsWithSegments("/api/obs") || path.StartsWithSegments("/api/batteries") || path.StartsWithSegments("/api/ha/states") || path.StartsWithSegments("/api/ha/toggle") || path.StartsWithSegments("/api/approvals") || path.StartsWithSegments("/api/rules/pause") || path.StartsWithSegments("/api/phone/battery") || path.StartsWithSegments("/api/stream")
+        || path == "/api/speech/state" || path == "/api/speech/start" || path == "/api/speech/stop" || path == "/api/speech/cancel" || path == "/api/speech/append-note" || path == "/api/speech/clear"
+        || IsWebhook(path);
 
     /// <summary>The webhook API: other machines on the network (or Tailscale) may push data with the same token.</summary>
     public static bool IsWebhook(PathString path) =>
@@ -88,4 +90,63 @@ public static class Lan
         || path.StartsWithSegments("/api/goto") || path.StartsWithSegments("/api/refresh");
 
     public static IPAddress Any => IPAddress.Any;
+}
+
+/// <summary>Request guard shared by Program.cs and integration tests to enforce LAN allow-list/tokens and local Host/Origin/Fetch metadata checks.</summary>
+internal static class AgentRequestGuard
+{
+    public static void UseSecurityMiddleware(
+        IApplicationBuilder app,
+        ConfigStore configStore,
+        int localPort,
+        int lanPort,
+        bool hasLanCert,
+        Func<string?, bool> hasPendingSpotifyState,
+        Action<HttpContext>? onAccepted = null)
+    {
+        string[] sameOrigins = [$"http://127.0.0.1:{localPort}", $"http://localhost:{localPort}"];
+        app.Use(async (ctx, next) =>
+        {
+            if (!IsAllowed(ctx, configStore, localPort, lanPort, hasLanCert, sameOrigins, hasPendingSpotifyState))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+            onAccepted?.Invoke(ctx);
+            ctx.Response.Headers.CacheControl = "no-store";
+            ctx.Response.Headers["X-Frame-Options"] = ctx.Request.Path.StartsWithSegments("/panel") ? "SAMEORIGIN" : "DENY";
+            await next();
+        });
+    }
+
+    public static bool IsAllowed(
+        HttpContext ctx,
+        ConfigStore configStore,
+        int localPort,
+        int lanPort,
+        bool hasLanCert,
+        string[] sameOrigins,
+        Func<string?, bool> hasPendingSpotifyState)
+    {
+        var origin = ctx.Request.Headers.Origin.ToString();
+        if (hasLanCert && ctx.Connection.LocalPort == lanPort)
+        {
+            var lan = configStore.Get().Lan;
+            var authorized = Lan.Matches(ctx.Request.Headers.Authorization, lan.Token!)
+                || (Lan.IsWebhook(ctx.Request.Path) && (Lan.Matches(ctx.Request.Headers.Authorization, lan.WebhookToken!)
+                    || Lan.MatchesQuery(ctx.Request.Query["token"], lan.WebhookToken!)));
+            return origin == "" && Lan.AllowedOverLan(ctx.Request.Path) && authorized;
+        }
+
+        var host = ctx.Request.Host.Host;
+        var spotifyCallback = ctx.Request.Method == "GET" && ctx.Request.Path == "/api/controls/spotify/callback"
+            && hasPendingSpotifyState(ctx.Request.Query["state"]);
+        return (host == "127.0.0.1" || host == "localhost")
+            && (origin == "" || sameOrigins.Contains(origin))
+            && (spotifyCallback || !BrowserGuard.IsForeign(
+                ctx.Request.Headers["Sec-Fetch-Site"],
+                ctx.Request.Headers["Sec-Fetch-Mode"],
+                ctx.Request.Method,
+                ctx.Request.Path));
+    }
 }
