@@ -25,6 +25,7 @@ public sealed partial class ControlDeck : BackgroundService
     private readonly Dictionary<string, (int Original, int Applied)> _duck = [];
     private int? _duckPercent;
     private readonly Dictionary<string, long> _sleep = [];
+    private readonly RadioLogoCache _logos;
     private readonly Lock _radioGate = new();
     private readonly Lock _radioState = new();
     private readonly SemaphoreSlim _focusGate = new(1, 1);
@@ -49,12 +50,13 @@ public sealed partial class ControlDeck : BackgroundService
         return new PortableDeckNative(audio, media);
 #endif
     }
-    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, PushStore? push = null, AudioControl? master = null, SpotifyControl? spotify = null)
+    internal ControlDeck(ConfigStore config, IDeckNative native, ILogger<ControlDeck> log, Func<long>? now = null, PushStore? push = null, AudioControl? master = null, SpotifyControl? spotify = null, RadioLogoCache? logos = null)
     {
         _config = config; _log = log; _push = push; _master = master; _spotify = spotify;
         _now = now ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         _tasks = new(config, log);
         _native = native;
+        _logos = logos ?? new RadioLogoCache();
         _native.SoundStopped += OnNativeSoundStopped;
         _ptt = new(id => Audio().Devices.FirstOrDefault(d => d.Id == id && d.Direction == "input")?.Muted,
             (id, muted) => { try { var ok = _native.Device(id, null, muted); Invalidate(); return ok; } catch { return false; } }, () => Environment.TickCount64);
@@ -277,7 +279,8 @@ public sealed partial class ControlDeck : BackgroundService
             case "radio":
                 return await RunWithMediaFocusAsync(async token =>
                 {
-                    if (op == "stop")
+                    // a tap on a playing station card stops it ("toggle"); a profile ("") always starts it
+                    if (op == "stop" || (op == "toggle" && IsRadioPlaying(action)))
                     {
                         StopRadio(action.Id, clearLast: true);
                         return new DeckResult(true);
@@ -383,7 +386,16 @@ public sealed partial class ControlDeck : BackgroundService
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         finally { _native.SoundStopped -= OnNativeSoundStopped; _ptt.Sweep(all: true); RestoreDucking(); lock (_state) foreach (var player in _fades.Keys.ToArray()) RestoreFade(player); await _tasks.StopAsync(); DisposeMixer(); _native.Dispose(); }
     }
-    public override void Dispose() { _native.SoundStopped -= OnNativeSoundStopped; base.Dispose(); }
+    /// <summary>Fetches or generates the cached logo for the specified radio action.</summary>
+    internal async Task<RadioLogo?> RadioLogoAsync(string id, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(id) || id.Length > 128) return null;
+        var c = _config.Get().Controls;
+        var action = c.Actions.FirstOrDefault(a => a.Id == id && a.Kind == "radio");
+        return action is null ? null : await _logos.GetAsync(action, c.AllowOnlineRadioLogos, ct);
+    }
+
+    public override void Dispose() { _native.SoundStopped -= OnNativeSoundStopped; base.Dispose(); _logos.Dispose(); }
     private async Task Tick(CancellationToken ct)
     {
         ReconcileRadios();

@@ -1194,8 +1194,8 @@ let swipeTracking = false;
 pager.addEventListener('touchstart', (e) => {
   swipeTracking = false;
   if (e.touches.length !== 1 || pages.length < 2) return;
-  // Dragging a slider, the volume bar or a list must never flip the page.
-  if (volDragging || e.target.closest?.('button, input, textarea, select, a, [contenteditable], .s-list, .vb')) return;
+  // Dragging a slider, the volume bar, a list or the station carousel must never flip (or wrap) the page.
+  if (volDragging || e.target.closest?.('button, input, textarea, select, a, [contenteditable], .s-list, .vb, .radio-carousel-track')) return;
   swipeStartX = e.touches[0].clientX;
   swipeStartY = e.touches[0].clientY;
   swipeStartPage = curPage;
