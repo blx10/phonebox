@@ -393,8 +393,19 @@ test('settings browser handles Google root, OneDrive collections, Dropbox cloud 
     albumId: 'root',
   });
 
-  // 2. OneDrive Photo Albums has Open without Select and opens albums
+  // 2. OneDrive root -> Use this folder saves albumId: 'root', and Photo Albums opens albums
   await providerSelect.selectOption('onedrive');
+  await inspector.getByRole('button', { name: 'Browse…' }).click();
+  await page.locator('#modalBody').getByRole('button', { name: 'Use this folder' }).click();
+  await expect(page.locator('#modal')).toBeHidden();
+  await inspector.getByRole('button', { name: 'Test source' }).click();
+  await expect(inspector).toContainText('Found 3 photos');
+  expect(await page.evaluate(() => window.__testRequests.at(-1)?.options)).toMatchObject({
+    provider: 'onedrive',
+    folder: '/',
+    albumId: 'root',
+  });
+
   await inspector.getByRole('button', { name: 'Browse…' }).click();
   const albumsRow = page.locator('#modalBody .browse-row', { hasText: 'Photo Albums' });
   await expect(albumsRow.getByRole('button', { name: 'Select' })).toHaveCount(0);
@@ -431,3 +442,60 @@ test('settings browser handles Google root, OneDrive collections, Dropbox cloud 
 
   expect(errors).toEqual([]);
 });
+
+test('photo frame preserves visible slide on transient fetch failure and recovers after initial failure', async ({ page }) => {
+  await page.clock.install();
+  const errors = watchErrors(page);
+
+  await page.addInitScript(() => {
+    let innerFetch = window.fetch;
+    Object.defineProperty(window, 'fetch', {
+      configurable: true,
+      get() {
+        return async (input, init = {}) => {
+          const url = typeof input === 'string' ? input : (input?.url || '');
+          if (sessionStorage.getItem('pb-test-fail-images') === '1' && url.includes('/api/photos/image/')) {
+            return new Response('unavailable', { status: 503 });
+          }
+          return innerFetch.call(window, input, init);
+        };
+      },
+      set(fn) { innerFetch = fn; },
+    });
+  });
+
+  // 1. Initial photo displays, then image fetches fail -> tapping next preserves the current visible photo
+  await page.goto('/panel/');
+  await page.evaluate(() => sessionStorage.removeItem('pb-test-fail-images'));
+  await showPhotos(page, {
+    provider: 'local',
+    folder: '~/Pictures/Favorites',
+    order: 'oldest',
+    tapAction: 'next',
+  });
+  await expect(page.locator('.w-photos .ph-layer.on .ph-img')).toHaveAttribute('src', /^blob:/);
+  await expect(page.locator('.w-photos .ph-cap')).toHaveText('Alpine ridge at sunrise');
+
+  await page.evaluate(() => sessionStorage.setItem('pb-test-fail-images', '1'));
+  await page.locator('.w-photos .ph-stage').click();
+  await page.waitForTimeout(150);
+  await expect(page.locator('.w-photos .ph-layer.on .ph-img')).toHaveAttribute('src', /^blob:/);
+  await expect(page.locator('.w-photos .empty')).toBeHidden();
+
+  // 2. Initial image fetch fails -> shows empty state -> later manifest refresh recovers the photo
+  await showPhotos(page, {
+    provider: 'local',
+    folder: '~/Pictures/Favorites',
+    order: 'oldest',
+  });
+  await expect(page.locator('.w-photos .empty')).toContainText('Photos could not be loaded');
+  await expect(page.locator('.w-photos .ph-layer.on')).toHaveCount(0);
+
+  await page.evaluate(() => sessionStorage.removeItem('pb-test-fail-images'));
+  await page.clock.fastForward(15 * 60_000 + 2000);
+  await expect(page.locator('.w-photos .ph-layer.on .ph-img')).toHaveAttribute('src', /^blob:/);
+  await expect(page.locator('.w-photos .empty')).toBeHidden();
+
+  expect(errors).toEqual([]);
+});
+

@@ -60,8 +60,12 @@ public sealed partial class CloudPhotoService : IDisposable
         string? Album,
         string? SourceLabel,
         bool AllowCloudDownload = false,
-        long ProviderEpoch = 0
+        long ProviderEpoch = 0,
+        string OwnerProvider = ""
     );
+
+    private static string EffectiveOwnerProvider(ResolvedPhoto item) =>
+        string.IsNullOrEmpty(item.OwnerProvider) ? item.Provider : item.OwnerProvider;
 
     private readonly ConfigStore _config;
     private readonly CloudPhotoAuth _auth;
@@ -337,7 +341,8 @@ public sealed partial class CloudPhotoService : IDisposable
 
             foreach (var kv in _items)
             {
-                if (string.Equals(kv.Value.Provider, provider, StringComparison.Ordinal))
+                if (string.Equals(EffectiveOwnerProvider(kv.Value), provider, StringComparison.Ordinal)
+                    || string.Equals(kv.Value.Provider, provider, StringComparison.Ordinal))
                     removedIds.Add(kv.Key);
             }
             foreach (var id in removedIds)
@@ -363,9 +368,13 @@ public sealed partial class CloudPhotoService : IDisposable
     {
         if (string.IsNullOrWhiteSpace(id) || id.Length > 80) return null;
         ResolvedPhoto? item;
+        string ownerProvider;
         lock (_gate)
         {
-            if (!_items.TryGetValue(id, out item) || item.ProviderEpoch != GetProviderEpochLocked(item.Provider))
+            if (!_items.TryGetValue(id, out item))
+                return null;
+            ownerProvider = EffectiveOwnerProvider(item);
+            if (item.ProviderEpoch != GetProviderEpochLocked(ownerProvider))
                 return null;
         }
 
@@ -384,7 +393,7 @@ public sealed partial class CloudPhotoService : IDisposable
                     var cachedMime = SafePhotoHttp.DetectRasterMime(cachedBytes);
                     if (cachedMime is not null)
                     {
-                        if (item.ProviderEpoch != GetProviderEpoch(item.Provider)) return null;
+                        if (item.ProviderEpoch != GetProviderEpoch(ownerProvider)) return null;
                         try { File.SetLastWriteTimeUtc(cachedPath, DateTime.UtcNow); } catch { }
                         return (cachedBytes, cachedMime);
                     }
@@ -395,7 +404,7 @@ public sealed partial class CloudPhotoService : IDisposable
 
         var fetched = await FetchRemotePhotoBytesAsync(item, ct);
         if (fetched is null) return null;
-        if (item.ProviderEpoch != GetProviderEpoch(item.Provider)) return null;
+        if (item.ProviderEpoch != GetProviderEpoch(ownerProvider)) return null;
 
         await WriteCacheFileAsync(cachedPath, fetched.Value.Bytes, ct);
         return fetched;
@@ -466,7 +475,7 @@ public sealed partial class CloudPhotoService : IDisposable
 
                 foreach (var rawItem in resolved.Take(MaxManifestItems))
                 {
-                    var item = rawItem with { ProviderEpoch = epochAtStart };
+                    var item = rawItem with { OwnerProvider = settings.Provider, ProviderEpoch = epochAtStart };
                     RegisterItemLocked(item);
                     feedItems.Add(new PhotoFeedItem(
                         Id: item.Id,
@@ -559,6 +568,7 @@ public sealed partial class CloudPhotoService : IDisposable
             return true;
         if (s.Provider is "onedrive" or "google" or "dropbox"
             && string.IsNullOrWhiteSpace(s.AlbumId)
+            && s.Folder.Trim() != "/"
             && IsExistingLocalDirectory(s.Folder)
             && (!_auth.IsConnected(s.Provider) || LooksLikeLocalFilesystemPath(s.Folder)))
         {
@@ -1608,11 +1618,19 @@ public sealed partial class CloudPhotoService : IDisposable
     private static string BuildOneDriveInitialUrl(PhotoWidgetSettings s)
     {
         const string select = "$select=id,name,file,folder,image,photo,createdDateTime,lastModifiedDateTime&$expand=thumbnails($select=large)&$top=100";
+        if (string.Equals(s.AlbumId, "root", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"https://graph.microsoft.com/v1.0/me/drive/root/children?{select}";
+        }
         if (!string.IsNullOrWhiteSpace(s.AlbumId) && s.AlbumId != "special:photos" && s.AlbumId != "albums")
         {
             return $"https://graph.microsoft.com/v1.0/me/drive/items/{Uri.EscapeDataString(s.AlbumId)}/children?{select}";
         }
         var trimmed = s.Folder.Trim('/');
+        if (string.IsNullOrEmpty(trimmed) && s.Folder.Trim() == "/")
+        {
+            return $"https://graph.microsoft.com/v1.0/me/drive/root/children?{select}";
+        }
         if (!string.IsNullOrEmpty(trimmed) && !string.Equals(trimmed, "Pictures", StringComparison.OrdinalIgnoreCase))
         {
             var encodedPath = string.Join('/', trimmed.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));

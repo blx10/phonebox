@@ -1507,7 +1507,7 @@ function openPhotosBrowser(provider, w, onPick) {
               const pickedAlbumId = provider === 'google'
                 ? (parentId || (curPath === 'My Drive' ? 'root' : ''))
                 : provider === 'onedrive'
-                  ? (parentId || '')
+                  ? (parentId || (curPath === '/' ? 'root' : ''))
                   : provider === 'dropbox'
                     ? curPath
                     : '';

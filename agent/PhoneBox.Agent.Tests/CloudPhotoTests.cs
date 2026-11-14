@@ -1272,4 +1272,91 @@ public sealed class CloudPhotoTests
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"Expected stalled stream to abort quickly, elapsed {sw.Elapsed}");
         Assert.Empty(Directory.GetFiles(env.CacheDir, "*.tmp"));
     }
+
+    [Fact]
+    public async Task SyncedLocalFolderUnderOAuthProviderSurvivesPriorEpochAndInvalidatesOnOwnerDisconnect()
+    {
+        using var env = new TempPhotoEnv();
+        var syncedDir = Path.Combine(env.RootDir, "OneDriveSync");
+        Directory.CreateDirectory(syncedDir);
+        File.WriteAllBytes(Path.Combine(syncedDir, "local-synced.png"), MinimalPng);
+
+        var store = env.WriteConfig(new { });
+        using var mockHttp = new HttpClient(new StubHttpHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound))));
+        using var auth = new CloudPhotoAuth(store, new AgentEndpoint(19987), mockHttp);
+        using var service = new CloudPhotoService(
+            store,
+            auth,
+            mockHttp,
+            env.CacheDir,
+            customLocalRoots: [new PhotoLocalRoot("onedrive-sync", "OneDrive", "onedrive", syncedDir)]);
+
+        // Simulate prior OneDrive connect/disconnect before configuring the widget with a local synced folder
+        service.InvalidateProvider("onedrive");
+
+        var feed = await service.GetPreviewFeedAsync(new PhotoPreviewRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(new
+            {
+                provider = "onedrive",
+                folder = syncedDir,
+                albumId = "",
+            }))), default);
+
+        var item = Assert.Single(feed.Photos);
+        var loaded = await service.GetPhotoBytesAsync(item.Id, default);
+        Assert.NotNull(loaded);
+        Assert.Equal("image/png", loaded!.Value.Mime);
+        Assert.Equal(MinimalPng, loaded.Value.Bytes);
+
+        // Disconnecting or invalidating the owning OAuth provider invalidates registered synced items
+        service.InvalidateProvider("onedrive");
+        Assert.Null(await service.GetPhotoBytesAsync(item.Id, default));
+    }
+
+    [Fact]
+    public async Task OneDriveRootSelectionQueriesRootChildrenInsteadOfSpecialPhotos()
+    {
+        using var env = new TempPhotoEnv();
+        var store = env.WriteConfig(new { cloudPhotos = new { oneDriveClientId = "od-client" } });
+        File.WriteAllText(store.Path + ".photos.json", JsonSerializer.Serialize(new
+        {
+            providers = new Dictionary<string, object>
+            {
+                ["onedrive"] = new { clientId = "od-client", accessToken = "ok-od", refreshToken = "rf-od", expiresAtMs = 9999999999999L }
+            }
+        }));
+
+        var requestedUrls = new List<string>();
+        using var mockHttp = new HttpClient(new StubHttpHandler((req, _) =>
+        {
+            var url = req.RequestUri!.AbsoluteUri;
+            requestedUrls.Add(url);
+            if (url.Contains("graph.microsoft.com"))
+            {
+                return Task.FromResult(JsonResp("""
+                {
+                  "value": [
+                    { "id": "od-root-1", "name": "root_photo.jpg", "file": { "mimeType": "image/jpeg" }, "image": {} }
+                  ]
+                }
+                """));
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }));
+
+        using var auth = new CloudPhotoAuth(store, new AgentEndpoint(19986), mockHttp);
+        using var service = new CloudPhotoService(store, auth, mockHttp, env.CacheDir);
+
+        await service.GetPreviewFeedAsync(new PhotoPreviewRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"provider":"onedrive","albumId":"root","folder":"/"}""")), default);
+        await service.GetPreviewFeedAsync(new PhotoPreviewRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"provider":"onedrive","albumId":"","folder":"/"}""")), default);
+        await service.GetPreviewFeedAsync(new PhotoPreviewRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"provider":"onedrive","albumId":"","folder":"Pictures"}""")), default);
+
+        Assert.Equal(3, requestedUrls.Count);
+        Assert.Contains("/me/drive/root/children", requestedUrls[0]);
+        Assert.Contains("/me/drive/root/children", requestedUrls[1]);
+        Assert.Contains("/me/drive/special/photos/children", requestedUrls[2]);
+    }
 }

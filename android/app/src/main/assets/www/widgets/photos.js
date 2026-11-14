@@ -147,8 +147,7 @@ W.photos = {
       downloadingCloud = false;
     }
 
-    function clearDisplayMedia() {
-      cancelPendingSlide();
+    function clearDisplayLayers() {
       layers.forEach((l) => {
         l.classList.remove('on', 'exit');
         l.firstChild.removeAttribute('src');
@@ -164,13 +163,18 @@ W.photos = {
         try { URL.revokeObjectURL(bgBlob); } catch (_) {}
         bgBlob = null;
       }
+    }
+
+    function clearDisplayMedia() {
+      cancelPendingSlide();
+      clearDisplayLayers();
       playlist = [];
       index = -1;
       visibleElapsedMs = 0;
     }
 
     function showEmpty(message) {
-      layers.forEach((l) => l.classList.remove('on', 'exit'));
+      clearDisplayLayers();
       meta.hidden = true;
       emptyEl.textContent = message;
       emptyEl.hidden = false;
@@ -296,7 +300,12 @@ W.photos = {
           }
         }
 
-        showEmpty('Photos could not be loaded');
+        if (layerBlobs[layerCursor] && layers[layerCursor].classList.contains('on')) {
+          emptyEl.hidden = true;
+          updateBadges();
+        } else {
+          showEmpty('Photos could not be loaded');
+        }
       } finally {
         if (mySeq === slideSeq) {
           slideBusy = false;
