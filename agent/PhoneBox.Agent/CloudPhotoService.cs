@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
+using Microsoft.Win32.SafeHandles;
 
 namespace PhoneBox.Agent;
 
@@ -32,7 +33,19 @@ public sealed partial class CloudPhotoService : IDisposable
         ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic", ".heif"
     };
 
-    internal sealed record CachedManifest(PhotoFeedResponse Response, long FetchedAtMs);
+    internal sealed record CachedManifest(
+        PhotoFeedResponse Response,
+        long FetchedAtMs,
+        string Provider,
+        long ProviderEpoch
+    );
+
+    private sealed record InFlightRefresh(
+        Task<PhotoFeedResponse> Task,
+        CancellationTokenSource CancelCts,
+        string Provider,
+        long ProviderEpoch
+    );
 
     internal sealed record ResolvedPhoto(
         string Id,
@@ -46,7 +59,8 @@ public sealed partial class CloudPhotoService : IDisposable
         string? Caption,
         string? Album,
         string? SourceLabel,
-        bool AllowCloudDownload = false
+        bool AllowCloudDownload = false,
+        long ProviderEpoch = 0
     );
 
     private readonly ConfigStore _config;
@@ -57,11 +71,14 @@ public sealed partial class CloudPhotoService : IDisposable
     private readonly IReadOnlyList<PhotoLocalRoot>? _customLocalRoots;
     private readonly Func<FileInfo, bool>? _isCloudOnlyOverride;
     private readonly Func<string, bool, byte[]>? _localFileReader;
+    private readonly TimeSpan _bodyReadTimeout;
+    private readonly SemaphoreSlim _materializationGate = new(2, 2);
 
     private readonly Lock _gate = new();
     private readonly Dictionary<string, CachedManifest> _manifests = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, Task<PhotoFeedResponse>> _inFlight = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, InFlightRefresh> _inFlight = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ResolvedPhoto> _items = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _providerEpochs = new(StringComparer.Ordinal);
     private readonly Queue<string> _itemOrder = new();
     private int _cacheWriteCounter;
 
@@ -77,7 +94,8 @@ public sealed partial class CloudPhotoService : IDisposable
         IEnumerable<PhotoLocalRoot>? customLocalRoots = null,
         bool ownsHttp = false,
         Func<FileInfo, bool>? isCloudOnlyOverride = null,
-        Func<string, bool, byte[]>? localFileReader = null)
+        Func<string, bool, byte[]>? localFileReader = null,
+        TimeSpan? bodyReadTimeout = null)
     {
         _config = config;
         _auth = auth;
@@ -87,6 +105,8 @@ public sealed partial class CloudPhotoService : IDisposable
         _ownsHttp = ownsHttp;
         _isCloudOnlyOverride = isCloudOnlyOverride;
         _localFileReader = localFileReader;
+        _bodyReadTimeout = bodyReadTimeout ?? TimeSpan.FromSeconds(25);
+        _auth.ProviderAuthChanged += InvalidateProvider;
     }
 
     private static long NowMs => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -208,6 +228,7 @@ public sealed partial class CloudPhotoService : IDisposable
         if (!IsSourceConfigured(settings))
             return new PhotoTestResponse(false, MissingSourceMessage(settings.Provider), 0, "");
 
+        var remoteStream = !UsesLocalDirectory(settings);
         var feed = await GetFeedAsync(settings, refresh: true, ct);
         if (!settings.DownloadCloudFiles && feed.Photos.Count == 0 && feed.CloudOnlyCount > 0)
         {
@@ -216,12 +237,13 @@ public sealed partial class CloudPhotoService : IDisposable
                 $"Found {feed.CloudOnlyCount} cloud-only photo{(feed.CloudOnlyCount == 1 ? "" : "s")} in {feed.SourceLabel}. Enable \"Download cloud-only files on demand\" below — viewing them will download photos from your cloud storage onto this computer.",
                 0,
                 feed.SourceLabel,
-                feed.CloudOnlyCount);
+                feed.CloudOnlyCount,
+                remoteStream);
         }
         if (!string.IsNullOrEmpty(feed.Error))
-            return new PhotoTestResponse(false, feed.Error, feed.Photos.Count, feed.SourceLabel, feed.CloudOnlyCount);
+            return new PhotoTestResponse(false, feed.Error, feed.Photos.Count, feed.SourceLabel, feed.CloudOnlyCount, remoteStream);
         if (feed.Photos.Count == 0)
-            return new PhotoTestResponse(false, $"No supported photos found in {feed.SourceLabel}", 0, feed.SourceLabel);
+            return new PhotoTestResponse(false, $"No supported photos found in {feed.SourceLabel}", 0, feed.SourceLabel, RemoteStream: remoteStream);
         if (!settings.DownloadCloudFiles && feed.CloudOnlyCount > 0)
         {
             return new PhotoTestResponse(
@@ -229,7 +251,8 @@ public sealed partial class CloudPhotoService : IDisposable
                 $"Found {feed.Photos.Count} local photo{(feed.Photos.Count == 1 ? "" : "s")} in {feed.SourceLabel} ({feed.CloudOnlyCount} cloud-only skipped — enable on-demand download to include them)",
                 feed.Photos.Count,
                 feed.SourceLabel,
-                feed.CloudOnlyCount);
+                feed.CloudOnlyCount,
+                remoteStream);
         }
         if (settings.DownloadCloudFiles && feed.CloudOnlyCount > 0)
         {
@@ -238,10 +261,11 @@ public sealed partial class CloudPhotoService : IDisposable
                 $"Found {feed.Photos.Count} photo{(feed.Photos.Count == 1 ? "" : "s")} in {feed.SourceLabel} ({feed.CloudOnlyCount} in cloud — photos will be downloaded onto this computer as they are shown)",
                 feed.Photos.Count,
                 feed.SourceLabel,
-                feed.CloudOnlyCount);
+                feed.CloudOnlyCount,
+                remoteStream);
         }
 
-        return new PhotoTestResponse(true, $"Found {feed.Photos.Count} photo{(feed.Photos.Count == 1 ? "" : "s")} in {feed.SourceLabel}", feed.Photos.Count, feed.SourceLabel);
+        return new PhotoTestResponse(true, $"Found {feed.Photos.Count} photo{(feed.Photos.Count == 1 ? "" : "s")} in {feed.SourceLabel}", feed.Photos.Count, feed.SourceLabel, RemoteStream: remoteStream);
     }
 
     public async Task<PhotoBrowseResponse> BrowseAsync(PhotoBrowseRequest req, CancellationToken ct)
@@ -272,13 +296,76 @@ public sealed partial class CloudPhotoService : IDisposable
         }
     }
 
+    private long GetProviderEpochLocked(string provider) =>
+        _providerEpochs.TryGetValue(provider, out var ep) ? ep : 0;
+
+    private long GetProviderEpoch(string provider)
+    {
+        lock (_gate) return GetProviderEpochLocked(provider);
+    }
+
+    /// <summary>
+    /// Clears cached manifests, cancels/invalidates in-flight refreshes, and removes registered/cached
+    /// items for <paramref name="provider"/> when its credentials are disconnected or replaced.
+    /// </summary>
+    public void InvalidateProvider(string provider)
+    {
+        if (string.IsNullOrWhiteSpace(provider)) return;
+
+        List<CancellationTokenSource> toCancel = [];
+        List<string> removedIds = [];
+        lock (_gate)
+        {
+            _providerEpochs[provider] = GetProviderEpochLocked(provider) + 1;
+
+            var manifestKeys = _manifests
+                .Where(kv => string.Equals(kv.Value.Provider, provider, StringComparison.Ordinal))
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var mk in manifestKeys) _manifests.Remove(mk);
+
+            var flightKeys = _inFlight
+                .Where(kv => string.Equals(kv.Value.Provider, provider, StringComparison.Ordinal))
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var fk in flightKeys)
+            {
+                if (_inFlight.TryGetValue(fk, out var inf))
+                    toCancel.Add(inf.CancelCts);
+                _inFlight.Remove(fk);
+            }
+
+            foreach (var kv in _items)
+            {
+                if (string.Equals(kv.Value.Provider, provider, StringComparison.Ordinal))
+                    removedIds.Add(kv.Key);
+            }
+            foreach (var id in removedIds)
+                _items.Remove(id);
+        }
+
+        foreach (var cts in toCancel)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+        }
+        foreach (var id in removedIds)
+        {
+            try
+            {
+                var p = Path.Combine(_cacheDir, id + ".bin");
+                if (File.Exists(p)) File.Delete(p);
+            }
+            catch { }
+        }
+    }
+
     public async Task<(byte[] Bytes, string Mime)?> GetPhotoBytesAsync(string id, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(id) || id.Length > 80) return null;
         ResolvedPhoto? item;
         lock (_gate)
         {
-            if (!_items.TryGetValue(id, out item))
+            if (!_items.TryGetValue(id, out item) || item.ProviderEpoch != GetProviderEpochLocked(item.Provider))
                 return null;
         }
 
@@ -297,6 +384,7 @@ public sealed partial class CloudPhotoService : IDisposable
                     var cachedMime = SafePhotoHttp.DetectRasterMime(cachedBytes);
                     if (cachedMime is not null)
                     {
+                        if (item.ProviderEpoch != GetProviderEpoch(item.Provider)) return null;
                         try { File.SetLastWriteTimeUtc(cachedPath, DateTime.UtcNow); } catch { }
                         return (cachedBytes, cachedMime);
                     }
@@ -307,6 +395,7 @@ public sealed partial class CloudPhotoService : IDisposable
 
         var fetched = await FetchRemotePhotoBytesAsync(item, ct);
         if (fetched is null) return null;
+        if (item.ProviderEpoch != GetProviderEpoch(item.Provider)) return null;
 
         await WriteCacheFileAsync(cachedPath, fetched.Value.Bytes, ct);
         return fetched;
@@ -329,36 +418,42 @@ public sealed partial class CloudPhotoService : IDisposable
 
         var key = SourceKey(settings);
         CachedManifest? staleFallback = null;
-        Task<PhotoFeedResponse>? existingTask = null;
+        InFlightRefresh? existing = null;
 
         lock (_gate)
         {
-            if (_manifests.TryGetValue(key, out var cached))
+            var epoch = GetProviderEpochLocked(settings.Provider);
+            if (_manifests.TryGetValue(key, out var cached) && cached.ProviderEpoch == epoch)
             {
                 staleFallback = cached;
                 if (!refresh && NowMs - cached.FetchedAtMs < CacheTtlMs)
                     return ApplyPresentationOrder(cached.Response, settings);
             }
 
-            if (!_inFlight.TryGetValue(key, out existingTask) || existingTask.IsCompleted)
+            if (!_inFlight.TryGetValue(key, out existing) || existing.Task.IsCompleted || existing.ProviderEpoch != epoch)
             {
-                existingTask = RefreshManifestCoreAsync(key, settings, staleFallback);
-                if (!existingTask.IsCompleted)
-                    _inFlight[key] = existingTask;
+                var cancelCts = new CancellationTokenSource();
+                var task = RefreshManifestCoreAsync(key, settings, staleFallback, epoch, cancelCts);
+                existing = new InFlightRefresh(task, cancelCts, settings.Provider, epoch);
+                if (!task.IsCompleted)
+                    _inFlight[key] = existing;
             }
         }
 
-        var fresh = await existingTask.WaitAsync(ct);
+        var fresh = await existing.Task.WaitAsync(ct);
         return ApplyPresentationOrder(fresh, settings);
     }
 
     private async Task<PhotoFeedResponse> RefreshManifestCoreAsync(
         string key,
         PhotoWidgetSettings settings,
-        CachedManifest? staleFallback)
+        CachedManifest? staleFallback,
+        long epochAtStart,
+        CancellationTokenSource cancelCts)
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-        var ct = cts.Token;
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancelCts.Token);
+        var ct = linkedCts.Token;
         try
         {
             var (sourceLabel, resolved, cloudOnlyCount) = await FetchProviderItemsAsync(settings, ct);
@@ -366,8 +461,12 @@ public sealed partial class CloudPhotoService : IDisposable
 
             lock (_gate)
             {
-                foreach (var item in resolved.Take(MaxManifestItems))
+                if (cancelCts.IsCancellationRequested || GetProviderEpochLocked(settings.Provider) != epochAtStart)
+                    throw new OperationCanceledException(cancelCts.Token);
+
+                foreach (var rawItem in resolved.Take(MaxManifestItems))
                 {
+                    var item = rawItem with { ProviderEpoch = epochAtStart };
                     RegisterItemLocked(item);
                     feedItems.Add(new PhotoFeedItem(
                         Id: item.Id,
@@ -379,32 +478,30 @@ public sealed partial class CloudPhotoService : IDisposable
                         Width: null,
                         Height: null));
                 }
+
+                var errorMsg = !settings.DownloadCloudFiles && feedItems.Count == 0 && cloudOnlyCount > 0
+                    ? $"{cloudOnlyCount} cloud-only photo{(cloudOnlyCount == 1 ? " was" : "s were")} not downloaded. Enable \"Download cloud-only files on demand\" in PhoneBox Settings to allow cloud downloads."
+                    : null;
+
+                var response = new PhotoFeedResponse(
+                    Configured: true,
+                    Provider: settings.Provider,
+                    SourceLabel: sourceLabel,
+                    Title: NullIfEmpty(settings.Title),
+                    UpdatedAt: NowMs,
+                    Stale: false,
+                    Error: errorMsg,
+                    Photos: feedItems,
+                    CloudOnlyCount: cloudOnlyCount);
+
+                _manifests[key] = new CachedManifest(response, response.UpdatedAt, settings.Provider, epochAtStart);
+                return response;
             }
-
-            var errorMsg = !settings.DownloadCloudFiles && feedItems.Count == 0 && cloudOnlyCount > 0
-                ? $"{cloudOnlyCount} cloud-only photo{(cloudOnlyCount == 1 ? " was" : "s were")} not downloaded. Enable \"Download cloud-only files on demand\" in PhoneBox Settings to allow cloud downloads."
-                : null;
-
-            var response = new PhotoFeedResponse(
-                Configured: true,
-                Provider: settings.Provider,
-                SourceLabel: sourceLabel,
-                Title: NullIfEmpty(settings.Title),
-                UpdatedAt: NowMs,
-                Stale: false,
-                Error: errorMsg,
-                Photos: feedItems,
-                CloudOnlyCount: cloudOnlyCount);
-
-            lock (_gate)
-            {
-                _manifests[key] = new CachedManifest(response, response.UpdatedAt);
-            }
-            return response;
         }
-        catch (Exception ex) when (ex is IOException or HttpRequestException or JsonException or XmlException or UnauthorizedAccessException or TaskCanceledException)
+        catch (Exception ex) when (ex is IOException or HttpRequestException or JsonException or XmlException or UnauthorizedAccessException or TaskCanceledException or OperationCanceledException)
         {
-            if (staleFallback is not null && staleFallback.Response.Photos.Count > 0)
+            var invalidated = cancelCts.IsCancellationRequested || GetProviderEpoch(settings.Provider) != epochAtStart;
+            if (!invalidated && staleFallback is not null && staleFallback.Response.Photos.Count > 0)
             {
                 return staleFallback.Response with
                 {
@@ -412,6 +509,9 @@ public sealed partial class CloudPhotoService : IDisposable
                     Error = ex.Message,
                 };
             }
+            var errText = invalidated && CloudPhotoAuth.IsOAuthProvider(settings.Provider) && !_auth.IsConnected(settings.Provider)
+                ? $"Connect {CloudPhotoAuth.ProviderDisplayName(settings.Provider)} in Settings › General"
+                : (invalidated ? "Photo source credentials changed" : ex.Message);
             return new PhotoFeedResponse(
                 Configured: true,
                 Provider: settings.Provider,
@@ -419,12 +519,17 @@ public sealed partial class CloudPhotoService : IDisposable
                 Title: NullIfEmpty(settings.Title),
                 UpdatedAt: NowMs,
                 Stale: false,
-                Error: ex.Message,
+                Error: errText,
                 Photos: []);
         }
         finally
         {
-            lock (_gate) _inFlight.Remove(key);
+            lock (_gate)
+            {
+                if (_inFlight.TryGetValue(key, out var cur) && ReferenceEquals(cur.CancelCts, cancelCts))
+                    _inFlight.Remove(key);
+            }
+            cancelCts.Dispose();
         }
     }
 
@@ -447,23 +552,35 @@ public sealed partial class CloudPhotoService : IDisposable
         };
     }
 
-    private async Task<(string SourceLabel, List<ResolvedPhoto> Items, int CloudOnlyCount)> FetchProviderItemsAsync(
-        PhotoWidgetSettings s,
-        CancellationToken ct)
+    private bool UsesLocalDirectory(PhotoWidgetSettings s)
     {
-        // Synced local folder fallback works seamlessly for local or when a local synced directory was chosen under OneDrive/iCloud/Google/Dropbox
-        if (s.Provider == "local")
-            return FetchFromLocalDirectory(s, s.Folder, "Computer folder");
-
-        if (s.Provider is "icloud" && string.IsNullOrWhiteSpace(s.ShareUrl) && IsExistingLocalDirectory(s.Folder))
-            return FetchFromLocalDirectory(s, s.Folder, "iCloud Photos (synced)");
-
+        if (s.Provider == "local") return true;
+        if (s.Provider == "icloud" && string.IsNullOrWhiteSpace(s.ShareUrl) && IsExistingLocalDirectory(s.Folder))
+            return true;
         if (s.Provider is "onedrive" or "google" or "dropbox"
             && string.IsNullOrWhiteSpace(s.AlbumId)
             && IsExistingLocalDirectory(s.Folder)
             && (!_auth.IsConnected(s.Provider) || LooksLikeLocalFilesystemPath(s.Folder)))
         {
-            return FetchFromLocalDirectory(s, s.Folder, $"{CloudPhotoAuth.ProviderDisplayName(s.Provider)} (synced)");
+            return true;
+        }
+        return false;
+    }
+
+    private async Task<(string SourceLabel, List<ResolvedPhoto> Items, int CloudOnlyCount)> FetchProviderItemsAsync(
+        PhotoWidgetSettings s,
+        CancellationToken ct)
+    {
+        // Synced local folder fallback works seamlessly for local or when a local synced directory was chosen under OneDrive/iCloud/Google/Dropbox
+        if (UsesLocalDirectory(s))
+        {
+            var label = s.Provider switch
+            {
+                "local" => "Computer folder",
+                "icloud" => "iCloud Photos (synced)",
+                _ => $"{CloudPhotoAuth.ProviderDisplayName(s.Provider)} (synced)",
+            };
+            return FetchFromLocalDirectory(s, s.Folder, label);
         }
 
         var (sourceLabel, items) = s.Provider switch
@@ -639,6 +756,8 @@ public sealed partial class CloudPhotoService : IDisposable
         var fullFile = Path.GetFullPath(filePath);
         if (!IsPathInsideRoot(fullFile, rootFull, EnsureTrailingSep(rootFull)))
             return null;
+        if (!HasNoIntermediateReparsePoints(rootFull, fullFile))
+            return null;
 
         var fi = new FileInfo(fullFile);
         if (!fi.Exists || fi.LinkTarget is not null)
@@ -651,29 +770,239 @@ public sealed partial class CloudPhotoService : IDisposable
         if (IsCloudOnlyPlaceholder(fi) && !allowCloudDownload)
             return null;
 
-        byte[] bytes;
+        byte[]? maybeBytes;
         using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        readCts.CancelAfter(TimeSpan.FromSeconds(25));
+        readCts.CancelAfter(_bodyReadTimeout);
         try
         {
             if (_localFileReader is not null)
-                bytes = _localFileReader(fullFile, allowCloudDownload);
-            else if (OperatingSystem.IsMacOS() && allowCloudDownload)
-                bytes = await Task.Run(() => ReadMacFileMaterializing(fullFile), readCts.Token);
+            {
+                maybeBytes = _localFileReader(fullFile, allowCloudDownload);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                if (allowCloudDownload)
+                {
+                    await _materializationGate.WaitAsync(readCts.Token);
+                    var releasedByWorker = false;
+                    Task<byte[]?> readTask;
+                    try
+                    {
+                        readTask = Task.Run(() =>
+                        {
+                            try
+                            {
+                                return ReadMacFileWithPolicy(rootFull, fullFile, IOPOL_MATERIALIZE_DATALESS_FILES_ON);
+                            }
+                            finally
+                            {
+                                ReleaseGateQuietly(_materializationGate);
+                            }
+                        });
+                        releasedByWorker = true;
+                    }
+                    finally
+                    {
+                        if (!releasedByWorker)
+                            ReleaseGateQuietly(_materializationGate);
+                    }
+                    _ = readTask.ContinueWith(static t => _ = t.Exception,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                    maybeBytes = await readTask.WaitAsync(readCts.Token);
+                }
+                else
+                {
+                    maybeBytes = await Task.Run(
+                        () => ReadMacFileWithPolicy(rootFull, fullFile, IOPOL_MATERIALIZE_DATALESS_FILES_OFF),
+                        readCts.Token).WaitAsync(readCts.Token);
+                }
+            }
             else
-                bytes = await File.ReadAllBytesAsync(fullFile, readCts.Token);
+            {
+                await using var fs = new FileStream(fullFile, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 16384, useAsync: true);
+                if (!IsOpenHandleInsideRoot(fs.SafeFileHandle, rootFull))
+                    return null;
+                maybeBytes = await ReadBoundedFileStreamAsync(fs, readCts.Token);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or ObjectDisposedException)
         {
             return null;
         }
 
-        var mime = SafePhotoHttp.DetectRasterMime(bytes);
-        return mime is null ? null : (bytes, mime);
+        if (maybeBytes is null) return null;
+        var mime = SafePhotoHttp.DetectRasterMime(maybeBytes);
+        return mime is null ? null : (maybeBytes, mime);
+    }
+
+    private static void ReleaseGateQuietly(SemaphoreSlim gate)
+    {
+        try { gate.Release(); } catch (ObjectDisposedException) { }
+    }
+
+    private static bool TryGetRelativeSegments(string rootFull, string fullFile, out string[] segments)
+    {
+        segments = [];
+        var normRoot = NormalizeMacPath(rootFull).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normFile = NormalizeMacPath(fullFile);
+        if (PathsEqual(normFile, normRoot) || !IsPathInsideRoot(normFile, normRoot, EnsureTrailingSep(normRoot)))
+            return false;
+
+        var rawRootSep = EnsureTrailingSep(rootFull);
+        var rel = fullFile.StartsWith(rawRootSep, PathComparison)
+            ? fullFile[rawRootSep.Length..]
+            : Path.GetRelativePath(normRoot, normFile);
+
+        if (string.IsNullOrWhiteSpace(rel) || rel == "." || Path.IsPathRooted(rel))
+            return false;
+
+        var parts = rel.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return false;
+        foreach (var part in parts)
+        {
+            if (part is "." or "..") return false;
+        }
+        segments = parts;
+        return true;
+    }
+
+    private static bool HasNoIntermediateReparsePoints(string rootFull, string fullFile)
+    {
+        if (!TryGetRelativeSegments(rootFull, fullFile, out var parts))
+            return false;
+
+        var cur = rootFull;
+        for (var i = 0; i < parts.Length - 1; i++)
+        {
+            cur = Path.Combine(cur, parts[i]);
+            try
+            {
+                var di = new DirectoryInfo(cur);
+                if (!di.Exists || di.LinkTarget is not null || (di.Attributes & FileAttributes.ReparsePoint) != 0)
+                    return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsOpenHandleInsideRoot(SafeFileHandle fileHandle, string rootFull)
+    {
+        if (fileHandle.IsInvalid) return false;
+
+        if (OperatingSystem.IsMacOS())
+        {
+            var rootFd = DarwinOpen(rootFull, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+            if (rootFd < 0) return false;
+            try
+            {
+                if (!TryGetMacFdPath(rootFd, out var rootReal)) return false;
+                var added = false;
+                fileHandle.DangerousAddRef(ref added);
+                try
+                {
+                    if (!TryGetMacFdPath((int)fileHandle.DangerousGetHandle(), out var fileReal)) return false;
+                    return IsPathInsideRoot(fileReal, rootReal, EnsureTrailingSep(rootReal));
+                }
+                finally
+                {
+                    if (added) fileHandle.DangerousRelease();
+                }
+            }
+            finally
+            {
+                DarwinClose(rootFd);
+            }
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            using var rootHandle = WinCreateFile(rootFull, 0, FILE_SHARE_ALL, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+            if (!TryGetWinHandleFinalPath(rootHandle, out var rootFinal)) return false;
+            if (!TryGetWinHandleFinalPath(fileHandle, out var fileFinal)) return false;
+            return IsPathInsideRoot(fileFinal, rootFinal, EnsureTrailingSep(rootFinal));
+        }
+
+        try
+        {
+            var added = false;
+            fileHandle.DangerousAddRef(ref added);
+            try
+            {
+                var fdLink = $"/proc/self/fd/{fileHandle.DangerousGetHandle()}";
+                var fileTarget = File.ResolveLinkTarget(fdLink, returnFinalTarget: true)?.FullName;
+                if (string.IsNullOrEmpty(fileTarget)) return false;
+                var rootCanonical = CanonicalizeUnixDirectory(rootFull);
+                return IsPathInsideRoot(fileTarget, rootCanonical, EnsureTrailingSep(rootCanonical));
+            }
+            finally
+            {
+                if (added) fileHandle.DangerousRelease();
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string CanonicalizeUnixDirectory(string fullPath)
+    {
+        var cur = Path.GetPathRoot(fullPath) ?? "/";
+        var rest = fullPath[cur.Length..].Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        foreach (var part in rest)
+        {
+            cur = Path.Combine(cur, part);
+            var target = Directory.ResolveLinkTarget(cur, returnFinalTarget: true);
+            if (target is not null)
+                cur = Path.GetFullPath(target.FullName);
+        }
+        return Path.GetFullPath(cur);
+    }
+
+    private static byte[]? ReadBoundedFileStream(FileStream fs)
+    {
+        if (fs.CanSeek && fs.Length is <= 0 or > SafePhotoHttp.MaxImageBytes)
+            return null;
+
+        using var ms = new MemoryStream(fs.CanSeek && fs.Length is > 0 and <= 1024 * 1024 ? (int)fs.Length : 16384);
+        var buffer = new byte[16384];
+        long total = 0;
+        while (true)
+        {
+            var read = fs.Read(buffer, 0, buffer.Length);
+            if (read == 0) break;
+            total += read;
+            if (total > SafePhotoHttp.MaxImageBytes) return null;
+            ms.Write(buffer, 0, read);
+        }
+        return total == 0 ? null : ms.ToArray();
+    }
+
+    private static async Task<byte[]?> ReadBoundedFileStreamAsync(FileStream fs, CancellationToken ct)
+    {
+        if (fs.CanSeek && fs.Length is <= 0 or > SafePhotoHttp.MaxImageBytes)
+            return null;
+
+        using var ms = new MemoryStream(fs.CanSeek && fs.Length is > 0 and <= 1024 * 1024 ? (int)fs.Length : 16384);
+        var buffer = new byte[16384];
+        long total = 0;
+        while (true)
+        {
+            var read = await fs.ReadAsync(buffer, ct);
+            if (read == 0) break;
+            total += read;
+            if (total > SafePhotoHttp.MaxImageBytes) return null;
+            ms.Write(buffer, 0, read);
+        }
+        return total == 0 ? null : ms.ToArray();
     }
 
     private bool IsCloudOnlyPlaceholder(FileInfo fi)
@@ -705,27 +1034,107 @@ public sealed partial class CloudPhotoService : IDisposable
         }
     }
 
-    private static byte[] ReadMacFileMaterializing(string fullFile)
+    private static byte[]? ReadMacFileWithPolicy(string rootFull, string fullFile, int policy)
     {
         var prev = DarwinGetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD);
-        DarwinSetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_ON);
+        DarwinSetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, policy);
         try
         {
-            return File.ReadAllBytes(fullFile);
+            return OpenAndReadMacFileNoFollow(rootFull, fullFile);
         }
         finally
         {
-            DarwinSetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, prev >= 0 ? prev : 0);
+            DarwinSetIoPolicy(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD,
+                prev >= 0 ? prev : IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT);
         }
+    }
+
+    private static byte[]? OpenAndReadMacFileNoFollow(string rootFull, string fullFile)
+    {
+        if (!TryGetRelativeSegments(rootFull, fullFile, out var segments))
+            return null;
+
+        var curFd = DarwinOpen(rootFull, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (curFd < 0) return null;
+
+        try
+        {
+            for (var i = 0; i < segments.Length - 1; i++)
+            {
+                var nextFd = DarwinOpenAt(curFd, segments[i], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+                DarwinClose(curFd);
+                curFd = nextFd;
+                if (curFd < 0) return null;
+            }
+
+            var fileFd = DarwinOpenAt(curFd, segments[^1], O_RDONLY | O_NOFOLLOW);
+            DarwinClose(curFd);
+            curFd = -1;
+            if (fileFd < 0) return null;
+
+            using var handle = new SafeFileHandle((IntPtr)fileFd, ownsHandle: true);
+            if (!IsOpenHandleInsideRoot(handle, rootFull))
+                return null;
+
+            using var fs = new FileStream(handle, FileAccess.Read);
+            return ReadBoundedFileStream(fs);
+        }
+        finally
+        {
+            if (curFd >= 0) DarwinClose(curFd);
+        }
+    }
+
+    private static bool TryGetMacFdPath(int fd, out string path)
+    {
+        path = "";
+        if (fd < 0) return false;
+        var al = new DarwinAttrList { bitmapcount = ATTR_BIT_MAP_COUNT, commonattr = ATTR_CMN_FULLPATH };
+        var buf = new byte[4096];
+        if (DarwinFGetAttrList(fd, ref al, buf, (nuint)buf.Length, 0) != 0)
+            return false;
+        var offset = BitConverter.ToInt32(buf, 4);
+        var len = BitConverter.ToInt32(buf, 8);
+        var start = 4 + offset;
+        if (offset < 8 || len <= 0 || start < 0 || start + len > buf.Length)
+            return false;
+        path = Encoding.UTF8.GetString(buf, start, len).TrimEnd('\0');
+        return path.Length > 0;
+    }
+
+    private static bool TryGetWinHandleFinalPath(SafeFileHandle handle, out string path)
+    {
+        path = "";
+        if (handle.IsInvalid) return false;
+        var buf = new char[1024];
+        var len = WinGetFinalPathNameByHandle(handle, buf, (uint)buf.Length, 0);
+        if (len == 0) return false;
+        if (len > buf.Length)
+        {
+            buf = new char[len];
+            len = WinGetFinalPathNameByHandle(handle, buf, (uint)buf.Length, 0);
+            if (len == 0 || len > buf.Length) return false;
+        }
+        path = new string(buf, 0, (int)len);
+        return path.Length > 0;
     }
 
     private const ushort ATTR_BIT_MAP_COUNT = 5;
     private const uint ATTR_CMN_FLAGS = 0x00040000u;
+    private const uint ATTR_CMN_FULLPATH = 0x08000000u;
     private const uint FSOPT_NOFOLLOW = 0x00000001u;
     private const uint SF_DATALESS = 0x40000000u;
+    private const int O_RDONLY = 0x0000;
+    private const int O_NOFOLLOW = 0x0100;
+    private const int O_DIRECTORY = 0x00100000;
     private const int IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES = 3;
     private const int IOPOL_SCOPE_THREAD = 1;
+    private const int IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT = 0;
+    private const int IOPOL_MATERIALIZE_DATALESS_FILES_OFF = 1;
     private const int IOPOL_MATERIALIZE_DATALESS_FILES_ON = 2;
+    private const uint FILE_SHARE_ALL = 0x00000007u;
+    private const uint OPEN_EXISTING = 3u;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000u;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DarwinAttrList
@@ -754,11 +1163,45 @@ public sealed partial class CloudPhotoService : IDisposable
         nuint attrBufSize,
         uint options);
 
+    [DllImport("libSystem.dylib", EntryPoint = "fgetattrlist")]
+    private static extern int DarwinFGetAttrList(
+        int fd,
+        ref DarwinAttrList attrList,
+        [Out] byte[] attrBuf,
+        nuint attrBufSize,
+        uint options);
+
+    [DllImport("libSystem.dylib", EntryPoint = "open", SetLastError = true)]
+    private static extern int DarwinOpen([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int oflag);
+
+    [DllImport("libSystem.dylib", EntryPoint = "openat", SetLastError = true)]
+    private static extern int DarwinOpenAt(int dirfd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int oflag);
+
+    [DllImport("libSystem.dylib", EntryPoint = "close")]
+    private static extern int DarwinClose(int fd);
+
     [DllImport("libSystem.dylib", EntryPoint = "getiopolicy_np")]
     private static extern int DarwinGetIoPolicy(int iotype, int scope);
 
     [DllImport("libSystem.dylib", EntryPoint = "setiopolicy_np")]
     private static extern int DarwinSetIoPolicy(int iotype, int scope, int policy);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle WinCreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint WinGetFinalPathNameByHandle(
+        SafeFileHandle hFile,
+        [Out] char[] lpszFilePath,
+        uint cchFilePath,
+        uint dwFlags);
 
     // ---------------------------------------------------------------- iCloud Shared Album
 
@@ -844,7 +1287,7 @@ public sealed partial class CloudPhotoService : IDisposable
             if (!resp.IsSuccessStatusCode)
                 throw new IOException($"iCloud Shared Album returned HTTP {(int)resp.StatusCode}; check that the public link is active");
 
-            var body = await SafePhotoHttp.ReadBoundedStringAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
+            var body = await ReadResponseStringBoundedAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
             streamDoc = JsonDocument.Parse(body);
             break;
         }
@@ -910,7 +1353,7 @@ public sealed partial class CloudPhotoService : IDisposable
                     extraHostValidator: u => IsValidICloudStreamHost(u.Host));
                 if (!resp.IsSuccessStatusCode) continue;
 
-                var json = await SafePhotoHttp.ReadBoundedStringAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
+                var json = await ReadResponseStringBoundedAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
                 using var doc = JsonDocument.Parse(json);
                 if (!doc.RootElement.TryGetProperty("items", out var itemsEl) || itemsEl.ValueKind != JsonValueKind.Object)
                     continue;
@@ -994,7 +1437,7 @@ public sealed partial class CloudPhotoService : IDisposable
             var entries = new List<PhotoBrowseEntry>
             {
                 new("special:photos", "Pictures / Photos", "folder", null, "Pictures"),
-                new("albums", "Photo Albums", "album", null, "Albums"),
+                new("albums", "Photo Albums", "collection", null, "Albums"),
             };
             var url = "https://graph.microsoft.com/v1.0/me/drive/root/children?$filter=folder ne null&$select=id,name,folder&$top=100";
             using var doc = await SendAuthedJsonAsync("onedrive", HttpMethod.Get, url, null, ct);
@@ -1059,6 +1502,7 @@ public sealed partial class CloudPhotoService : IDisposable
         if (!_auth.IsConnected("onedrive"))
             throw new IOException("Connect OneDrive in Settings › General, or pick a synced local OneDrive folder");
 
+        var sessionStamp = _auth.GetSessionStamp("onedrive");
         var sourceLabel = !string.IsNullOrWhiteSpace(s.Folder) ? s.Folder : (!string.IsNullOrWhiteSpace(s.AlbumId) ? "OneDrive Album" : "OneDrive Photos");
         var initialUrl = BuildOneDriveInitialUrl(s);
 
@@ -1069,73 +1513,96 @@ public sealed partial class CloudPhotoService : IDisposable
 
         while (folderQueue.Count > 0 && items.Count < MaxManifestItems && pagesFetched < 10)
         {
-            var (nextUrl, albumLabel) = folderQueue.Dequeue();
-            pagesFetched++;
-            using var doc = await SendAuthedJsonAsync("onedrive", HttpMethod.Get, nextUrl, null, ct);
-            if (!doc.RootElement.TryGetProperty("value", out var arr) || arr.ValueKind != JsonValueKind.Array)
-                continue;
+            var (startUrl, albumLabel) = folderQueue.Dequeue();
+            string? pageUrl = startUrl;
+            var seenPages = new HashSet<string>(StringComparer.Ordinal);
 
-            foreach (var entry in arr.EnumerateArray())
+            while (pageUrl is not null && seenPages.Add(pageUrl) && items.Count < MaxManifestItems && pagesFetched < 10)
             {
-                if (items.Count >= MaxManifestItems) break;
-                var id = entry.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
-                var name = entry.TryGetProperty("name", out var nEl) ? nEl.GetString() : null;
-                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
-
-                if (entry.TryGetProperty("folder", out _))
+                pagesFetched++;
+                using var doc = await SendAuthedJsonAsync("onedrive", HttpMethod.Get, pageUrl, null, ct);
+                if (doc.RootElement.TryGetProperty("value", out var arr) && arr.ValueKind == JsonValueKind.Array)
                 {
-                    if (s.Subfolders && folderQueue.Count < 8)
+                    foreach (var entry in arr.EnumerateArray())
                     {
-                        var child = $"https://graph.microsoft.com/v1.0/me/drive/items/{Uri.EscapeDataString(id)}/children?$select=id,name,file,folder,image,photo,createdDateTime,lastModifiedDateTime&$expand=thumbnails($select=large)&$top=100";
-                        folderQueue.Enqueue((child, name));
+                        if (items.Count >= MaxManifestItems) break;
+                        var id = entry.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+                        var name = entry.TryGetProperty("name", out var nEl) ? nEl.GetString() : null;
+                        if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
+
+                        if (entry.TryGetProperty("folder", out _))
+                        {
+                            if (s.Subfolders && folderQueue.Count < 8)
+                            {
+                                var child = $"https://graph.microsoft.com/v1.0/me/drive/items/{Uri.EscapeDataString(id)}/children?$select=id,name,file,folder,image,photo,createdDateTime,lastModifiedDateTime&$expand=thumbnails($select=large)&$top=100";
+                                folderQueue.Enqueue((child, name));
+                            }
+                            continue;
+                        }
+
+                        if (!entry.TryGetProperty("file", out var fileEl)) continue;
+                        var mime = fileEl.TryGetProperty("mimeType", out var mt) ? mt.GetString() ?? "" : "";
+                        var isImage = entry.TryGetProperty("image", out _) || mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
+                        if (!isImage) continue;
+
+                        var ext = Path.GetExtension(name);
+                        var preferThumbnail = !ImageExtensions.Contains(ext) && CloudPreviewImageExtensions.Contains(ext);
+                        string? thumbUrl = null;
+                        if (entry.TryGetProperty("thumbnails", out var thumbs) && thumbs.ValueKind == JsonValueKind.Array && thumbs.GetArrayLength() > 0)
+                        {
+                            var t0 = thumbs[0];
+                            if (t0.TryGetProperty("large", out var large) && large.TryGetProperty("url", out var uEl))
+                                thumbUrl = uEl.GetString();
+                        }
+
+                        var contentUrl = $"https://graph.microsoft.com/v1.0/me/drive/items/{Uri.EscapeDataString(id)}/content";
+                        var fetchUrl = preferThumbnail && !string.IsNullOrWhiteSpace(thumbUrl) ? thumbUrl! : contentUrl;
+                        var fallback = preferThumbnail ? null : thumbUrl;
+
+                        long? takenAt = null;
+                        if (entry.TryGetProperty("photo", out var phEl) && phEl.TryGetProperty("takenDateTime", out var td)
+                            && DateTimeOffset.TryParse(td.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var dto))
+                            takenAt = dto.ToUnixTimeMilliseconds();
+                        else if (entry.TryGetProperty("createdDateTime", out var cd)
+                            && DateTimeOffset.TryParse(cd.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var cdto))
+                            takenAt = cdto.ToUnixTimeMilliseconds();
+
+                        var itemId = ComputeId("onedrive", $"{sessionStamp}\0{id}", takenAt?.ToString(CultureInfo.InvariantCulture) ?? "");
+                        items.Add(new ResolvedPhoto(
+                            Id: itemId,
+                            Provider: "onedrive",
+                            RemoteUrlOrId: fetchUrl,
+                            LocalFilePath: null,
+                            LocalRootPath: null,
+                            ExtraHeaderArg: null,
+                            FallbackUrl: fallback,
+                            TakenAtMs: takenAt,
+                            Caption: Path.GetFileNameWithoutExtension(name),
+                            Album: albumLabel,
+                            SourceLabel: sourceLabel));
                     }
-                    continue;
                 }
 
-                if (!entry.TryGetProperty("file", out var fileEl)) continue;
-                var mime = fileEl.TryGetProperty("mimeType", out var mt) ? mt.GetString() ?? "" : "";
-                var isImage = entry.TryGetProperty("image", out _) || mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase);
-                if (!isImage) continue;
-
-                var ext = Path.GetExtension(name);
-                var preferThumbnail = !ImageExtensions.Contains(ext) && CloudPreviewImageExtensions.Contains(ext);
-                string? thumbUrl = null;
-                if (entry.TryGetProperty("thumbnails", out var thumbs) && thumbs.ValueKind == JsonValueKind.Array && thumbs.GetArrayLength() > 0)
-                {
-                    var t0 = thumbs[0];
-                    if (t0.TryGetProperty("large", out var large) && large.TryGetProperty("url", out var uEl))
-                        thumbUrl = uEl.GetString();
-                }
-
-                var contentUrl = $"https://graph.microsoft.com/v1.0/me/drive/items/{Uri.EscapeDataString(id)}/content";
-                var fetchUrl = preferThumbnail && !string.IsNullOrWhiteSpace(thumbUrl) ? thumbUrl! : contentUrl;
-                var fallback = preferThumbnail ? null : thumbUrl;
-
-                long? takenAt = null;
-                if (entry.TryGetProperty("photo", out var phEl) && phEl.TryGetProperty("takenDateTime", out var td)
-                    && DateTimeOffset.TryParse(td.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var dto))
-                    takenAt = dto.ToUnixTimeMilliseconds();
-                else if (entry.TryGetProperty("createdDateTime", out var cd)
-                    && DateTimeOffset.TryParse(cd.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var cdto))
-                    takenAt = cdto.ToUnixTimeMilliseconds();
-
-                var itemId = ComputeId("onedrive", id, takenAt?.ToString(CultureInfo.InvariantCulture) ?? "");
-                items.Add(new ResolvedPhoto(
-                    Id: itemId,
-                    Provider: "onedrive",
-                    RemoteUrlOrId: fetchUrl,
-                    LocalFilePath: null,
-                    LocalRootPath: null,
-                    ExtraHeaderArg: null,
-                    FallbackUrl: fallback,
-                    TakenAtMs: takenAt,
-                    Caption: Path.GetFileNameWithoutExtension(name),
-                    Album: albumLabel,
-                    SourceLabel: sourceLabel));
+                pageUrl = doc.RootElement.TryGetProperty("@odata.nextLink", out var nextEl)
+                    && nextEl.ValueKind == JsonValueKind.String
+                    && TryValidateOneDriveContinuationUrl(nextEl.GetString(), out var validatedNext)
+                    ? validatedNext
+                    : null;
             }
         }
 
         return (sourceLabel, items);
+    }
+
+    private static bool TryValidateOneDriveContinuationUrl(string? raw, out string validated)
+    {
+        validated = "";
+        if (!SafePhotoHttp.TryValidateHttpsUri(raw, out var uri, out _) || uri is null)
+            return false;
+        if (!string.Equals(uri.Host, "graph.microsoft.com", StringComparison.OrdinalIgnoreCase))
+            return false;
+        validated = uri.AbsoluteUri;
+        return true;
     }
 
     private static string BuildOneDriveInitialUrl(PhotoWidgetSettings s)
@@ -1197,6 +1664,7 @@ public sealed partial class CloudPhotoService : IDisposable
         if (!_auth.IsConnected("google"))
             throw new IOException("Connect Google Drive in Settings › General, or pick a synced local Google Drive folder");
 
+        var sessionStamp = _auth.GetSessionStamp("google");
         var targetFolderId = SanitizeDriveId(s.AlbumId);
         var sourceLabel = !string.IsNullOrWhiteSpace(s.Folder) ? s.Folder : "Google Drive";
         if (string.IsNullOrEmpty(targetFolderId) && !string.IsNullOrWhiteSpace(s.Folder))
@@ -1210,72 +1678,83 @@ public sealed partial class CloudPhotoService : IDisposable
         while (queue.Count > 0 && items.Count < MaxManifestItems && ops < 10)
         {
             var (folderId, albumName) = queue.Dequeue();
-            ops++;
-
             var q = folderId is not null
                 ? $"'{folderId}' in parents and trashed = false"
                 : "mimeType contains 'image/' and trashed = false";
-            var url = $"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=files(id,name,mimeType,thumbnailLink,createdTime,modifiedTime,description,imageMediaMetadata(time))&pageSize=100";
+            string? pageToken = null;
+            var seenTokens = new HashSet<string>(StringComparer.Ordinal);
 
-            using var doc = await SendAuthedJsonAsync("google", HttpMethod.Get, url, null, ct);
-            if (!doc.RootElement.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array)
-                continue;
-
-            foreach (var f in files.EnumerateArray())
+            do
             {
-                if (items.Count >= MaxManifestItems) break;
-                var id = f.TryGetProperty("id", out var i) ? i.GetString() : null;
-                var name = f.TryGetProperty("name", out var n) ? n.GetString() : null;
-                var mime = f.TryGetProperty("mimeType", out var mt) ? mt.GetString() ?? "" : "";
-                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
+                ops++;
+                var pageParam = pageToken is null ? "" : "&pageToken=" + Uri.EscapeDataString(pageToken);
+                var url = $"https://www.googleapis.com/drive/v3/files?q={Uri.EscapeDataString(q)}&fields=nextPageToken,files(id,name,mimeType,thumbnailLink,createdTime,modifiedTime,description,imageMediaMetadata(time))&pageSize=100{pageParam}";
 
-                if (mime == "application/vnd.google-apps.folder")
+                using var doc = await SendAuthedJsonAsync("google", HttpMethod.Get, url, null, ct);
+                if (doc.RootElement.TryGetProperty("files", out var files) && files.ValueKind == JsonValueKind.Array)
                 {
-                    if (s.Subfolders && folderId is not null && queue.Count < 8 && SanitizeDriveId(id) is { Length: > 0 } safeChild)
-                        queue.Enqueue((safeChild, name));
-                    continue;
+                    foreach (var f in files.EnumerateArray())
+                    {
+                        if (items.Count >= MaxManifestItems) break;
+                        var id = f.TryGetProperty("id", out var i) ? i.GetString() : null;
+                        var name = f.TryGetProperty("name", out var n) ? n.GetString() : null;
+                        var mime = f.TryGetProperty("mimeType", out var mt) ? mt.GetString() ?? "" : "";
+                        if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
+
+                        if (mime == "application/vnd.google-apps.folder")
+                        {
+                            if (s.Subfolders && folderId is not null && queue.Count < 8 && SanitizeDriveId(id) is { Length: > 0 } safeChild)
+                                queue.Enqueue((safeChild, name));
+                            continue;
+                        }
+
+                        if (!mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        var thumb = f.TryGetProperty("thumbnailLink", out var tl) ? tl.GetString() : null;
+                        if (!string.IsNullOrWhiteSpace(thumb))
+                            thumb = Regex.Replace(thumb, @"=s\d+$", "=s1600");
+
+                        var directUrl = $"https://www.googleapis.com/drive/v3/files/{Uri.EscapeDataString(id)}?alt=media";
+                        var isHeic = mime.Contains("heic", StringComparison.OrdinalIgnoreCase) || mime.Contains("heif", StringComparison.OrdinalIgnoreCase);
+                        var primary = isHeic && !string.IsNullOrWhiteSpace(thumb) ? thumb! : directUrl;
+                        var fallback = isHeic ? null : thumb;
+
+                        var caption = f.TryGetProperty("description", out var desc) && desc.ValueKind == JsonValueKind.String
+                            ? desc.GetString()
+                            : null;
+                        if (string.IsNullOrWhiteSpace(caption)) caption = Path.GetFileNameWithoutExtension(name);
+
+                        long? takenAt = null;
+                        if (f.TryGetProperty("imageMediaMetadata", out var meta)
+                            && meta.TryGetProperty("time", out var metaTime)
+                            && metaTime.ValueKind == JsonValueKind.String
+                            && DateTimeOffset.TryParseExact(metaTime.GetString(), "yyyy:MM:dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var mDto))
+                            takenAt = mDto.ToUnixTimeMilliseconds();
+                        else if (f.TryGetProperty("createdTime", out var ctEl)
+                            && DateTimeOffset.TryParse(ctEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var cDto))
+                            takenAt = cDto.ToUnixTimeMilliseconds();
+
+                        var itemId = ComputeId("google", $"{sessionStamp}\0{id}", takenAt?.ToString(CultureInfo.InvariantCulture) ?? "");
+                        items.Add(new ResolvedPhoto(
+                            Id: itemId,
+                            Provider: "google",
+                            RemoteUrlOrId: primary,
+                            LocalFilePath: null,
+                            LocalRootPath: null,
+                            ExtraHeaderArg: null,
+                            FallbackUrl: fallback,
+                            TakenAtMs: takenAt,
+                            Caption: caption,
+                            Album: albumName,
+                            SourceLabel: sourceLabel));
+                    }
                 }
 
-                if (!mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase)) continue;
-
-                var thumb = f.TryGetProperty("thumbnailLink", out var tl) ? tl.GetString() : null;
-                if (!string.IsNullOrWhiteSpace(thumb))
-                    thumb = Regex.Replace(thumb, @"=s\d+$", "=s1600");
-
-                var directUrl = $"https://www.googleapis.com/drive/v3/files/{Uri.EscapeDataString(id)}?alt=media";
-                var isHeic = mime.Contains("heic", StringComparison.OrdinalIgnoreCase) || mime.Contains("heif", StringComparison.OrdinalIgnoreCase);
-                var primary = isHeic && !string.IsNullOrWhiteSpace(thumb) ? thumb! : directUrl;
-                var fallback = isHeic ? null : thumb;
-
-                var caption = f.TryGetProperty("description", out var desc) && desc.ValueKind == JsonValueKind.String
-                    ? desc.GetString()
+                var nextTok = doc.RootElement.TryGetProperty("nextPageToken", out var npt) && npt.ValueKind == JsonValueKind.String
+                    ? npt.GetString()
                     : null;
-                if (string.IsNullOrWhiteSpace(caption)) caption = Path.GetFileNameWithoutExtension(name);
-
-                long? takenAt = null;
-                if (f.TryGetProperty("imageMediaMetadata", out var meta)
-                    && meta.TryGetProperty("time", out var metaTime)
-                    && metaTime.ValueKind == JsonValueKind.String
-                    && DateTimeOffset.TryParseExact(metaTime.GetString(), "yyyy:MM:dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var mDto))
-                    takenAt = mDto.ToUnixTimeMilliseconds();
-                else if (f.TryGetProperty("createdTime", out var ctEl)
-                    && DateTimeOffset.TryParse(ctEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var cDto))
-                    takenAt = cDto.ToUnixTimeMilliseconds();
-
-                var itemId = ComputeId("google", id, takenAt?.ToString(CultureInfo.InvariantCulture) ?? "");
-                items.Add(new ResolvedPhoto(
-                    Id: itemId,
-                    Provider: "google",
-                    RemoteUrlOrId: primary,
-                    LocalFilePath: null,
-                    LocalRootPath: null,
-                    ExtraHeaderArg: null,
-                    FallbackUrl: fallback,
-                    TakenAtMs: takenAt,
-                    Caption: caption,
-                    Album: albumName,
-                    SourceLabel: sourceLabel));
-            }
+                pageToken = !string.IsNullOrWhiteSpace(nextTok) && seenTokens.Add(nextTok) ? nextTok : null;
+            } while (pageToken is not null && items.Count < MaxManifestItems && ops < 10);
         }
 
         return (sourceLabel, items);
@@ -1348,6 +1827,7 @@ public sealed partial class CloudPhotoService : IDisposable
         if (!_auth.IsConnected("dropbox"))
             throw new IOException("Connect Dropbox in Settings › General, or pick a synced local Dropbox folder");
 
+        var sessionStamp = _auth.GetSessionStamp("dropbox");
         var path = NormalizeDropboxPath(string.IsNullOrEmpty(s.AlbumId) ? s.Folder : s.AlbumId);
         var label = string.IsNullOrEmpty(path) ? "Dropbox" : Path.GetFileName(path.Trim('/'));
         if (string.IsNullOrEmpty(label)) label = "Dropbox";
@@ -1387,7 +1867,7 @@ public sealed partial class CloudPhotoService : IDisposable
                         takenAt = cDto.ToUnixTimeMilliseconds();
 
                     var rev = entry.TryGetProperty("rev", out var r) ? r.GetString() ?? "" : "";
-                    var itemId = ComputeId("dropbox", pathLower, rev);
+                    var itemId = ComputeId("dropbox", $"{sessionStamp}\0{pathLower}", rev);
                     var apiArg = JsonSerializer.Serialize(new { path = pathLower });
                     var parentDir = Path.GetFileName(Path.GetDirectoryName(pathLower.Replace('/', Path.DirectorySeparatorChar)) ?? "") ?? label;
 
@@ -1587,7 +2067,7 @@ public sealed partial class CloudPhotoService : IDisposable
             if (!resp.IsSuccessStatusCode && (int)resp.StatusCode != 207)
                 throw new IOException($"Nextcloud WebDAV returned HTTP {(int)resp.StatusCode}");
 
-            var xml = await SafePhotoHttp.ReadBoundedStringAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
+            var xml = await ReadResponseStringBoundedAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
             return ParseWebDavResponses(xml, new Uri(requestUrl).AbsolutePath, usedFallback);
         }
     }
@@ -1662,11 +2142,25 @@ public sealed partial class CloudPhotoService : IDisposable
             if (!resp.IsSuccessStatusCode)
                 throw new IOException($"{CloudPhotoAuth.ProviderDisplayName(provider)} returned HTTP {(int)resp.StatusCode}");
 
-            var body = await SafePhotoHttp.ReadBoundedStringAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
+            var body = await ReadResponseStringBoundedAsync(resp.Content, SafePhotoHttp.MaxJsonBytes, ct);
             return JsonDocument.Parse(body);
         }
 
         throw new IOException($"Reconnect {CloudPhotoAuth.ProviderDisplayName(provider)} in Settings › General");
+    }
+
+    private async Task<string> ReadResponseStringBoundedAsync(HttpContent content, long maxBytes, CancellationToken ct)
+    {
+        using var bodyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bodyCts.CancelAfter(_bodyReadTimeout);
+        try
+        {
+            return await SafePhotoHttp.ReadBoundedStringAsync(content, maxBytes, bodyCts.Token);
+        }
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            throw new IOException("Provider response timed out", ex);
+        }
     }
 
     private async Task<(byte[] Bytes, string Mime)?> FetchRemotePhotoBytesAsync(ResolvedPhoto item, CancellationToken ct)
@@ -1708,11 +2202,17 @@ public sealed partial class CloudPhotoService : IDisposable
                         continue;
                     if (!resp.IsSuccessStatusCode) break;
 
-                    var bytes = await SafePhotoHttp.ReadBoundedBytesAsync(resp.Content, SafePhotoHttp.MaxImageBytes, ct);
+                    using var bodyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    bodyCts.CancelAfter(_bodyReadTimeout);
+                    var bytes = await SafePhotoHttp.ReadBoundedBytesAsync(resp.Content, SafePhotoHttp.MaxImageBytes, bodyCts.Token);
                     var mime = SafePhotoHttp.DetectRasterMime(bytes);
                     if (mime is not null)
                         return (bytes, mime);
                     break;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch
                 {
@@ -1728,17 +2228,28 @@ public sealed partial class CloudPhotoService : IDisposable
 
     private async Task WriteCacheFileAsync(string path, byte[] bytes, CancellationToken ct)
     {
+        string? tmp = null;
         try
         {
             Directory.CreateDirectory(_cacheDir);
-            var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             await File.WriteAllBytesAsync(tmp, bytes, ct);
             File.Move(tmp, path, overwrite: true);
+            tmp = null;
 
             if (Interlocked.Increment(ref _cacheWriteCounter) % 8 == 0)
                 PruneCacheDirectory();
         }
         catch { /* disk cache failures are non-fatal */ }
+        finally
+        {
+            try
+            {
+                if (tmp is not null && File.Exists(tmp))
+                    File.Delete(tmp);
+            }
+            catch { }
+        }
     }
 
     private void PruneCacheDirectory()
@@ -1774,12 +2285,12 @@ public sealed partial class CloudPhotoService : IDisposable
     {
         if (!_items.ContainsKey(item.Id))
         {
-            _itemOrder.Enqueue(item.Id);
-            while (_itemOrder.Count > MaxItemRegistry)
+            while ((_items.Count >= MaxItemRegistry || _itemOrder.Count >= MaxItemRegistry * 2) && _itemOrder.Count > 0)
             {
                 var victim = _itemOrder.Dequeue();
                 _items.Remove(victim);
             }
+            _itemOrder.Enqueue(item.Id);
         }
         _items[item.Id] = item;
     }
@@ -1839,12 +2350,14 @@ public sealed partial class CloudPhotoService : IDisposable
         _ => "Choose a photo album or folder in PhoneBox Settings",
     };
 
-    private static string SourceKey(PhotoWidgetSettings s)
+    private string SourceKey(PhotoWidgetSettings s)
     {
         var pwdHash = string.IsNullOrEmpty(s.SharePassword)
             ? ""
             : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(s.SharePassword))[..8]);
-        return $"{s.Provider}|{s.ShareUrl}|{pwdHash}|{s.AlbumId}|{s.Folder}|{(s.Subfolders ? '1' : '0')}|{(s.DownloadCloudFiles ? '1' : '0')}";
+        var authStamp = CloudPhotoAuth.IsOAuthProvider(s.Provider) ? _auth.GetSessionStamp(s.Provider) : "";
+        var epoch = GetProviderEpoch(s.Provider);
+        return $"{s.Provider}|{authStamp}|{epoch}|{s.ShareUrl}|{pwdHash}|{s.AlbumId}|{s.Folder}|{(s.Subfolders ? '1' : '0')}|{(s.DownloadCloudFiles ? '1' : '0')}";
     }
 
     private static string ComputeId(string provider, string key, string stamp)
@@ -2015,6 +2528,8 @@ public sealed partial class CloudPhotoService : IDisposable
 
     public void Dispose()
     {
+        _auth.ProviderAuthChanged -= InvalidateProvider;
+        _materializationGate.Dispose();
         if (_ownsHttp) _http.Dispose();
     }
 }

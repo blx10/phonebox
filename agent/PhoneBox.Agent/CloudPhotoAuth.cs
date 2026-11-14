@@ -46,6 +46,9 @@ public sealed class CloudPhotoAuth : IDisposable
     private readonly Dictionary<string, PendingAuth> _pending = new(StringComparer.Ordinal);
     private TokenStoreFile? _store;
 
+    /// <summary>Raised when a provider connects, reconnects, or disconnects so downstream caches can be invalidated.</summary>
+    public event Action<string>? ProviderAuthChanged;
+
     public CloudPhotoAuth(ConfigStore config, AgentEndpoint endpoint)
         : this(config, endpoint, SafePhotoHttp.CreateClient(TimeSpan.FromSeconds(15)), ownsHttp: true) { }
 
@@ -209,9 +212,13 @@ public sealed class CloudPhotoAuth : IDisposable
             var account = await TryFetchAccountAsync(provider, token.AccessToken, ct);
             token = token with { Account = account };
 
-            var store = LoadStoreLocked();
-            store.Providers[provider] = token;
-            SaveStoreLocked(store);
+            var current = EnsureStoreLoaded();
+            var nextProviders = new Dictionary<string, ProviderToken>(current.Providers, StringComparer.Ordinal)
+            {
+                [provider] = token,
+            };
+            SaveStore(new TokenStoreFile { Providers = nextProviders });
+            ProviderAuthChanged?.Invoke(provider);
             return (true, null);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -236,9 +243,14 @@ public sealed class CloudPhotoAuth : IDisposable
         await _tokenGate.WaitAsync(ct);
         try
         {
-            var store = LoadStoreLocked();
-            if (store.Providers.Remove(provider))
-                SaveStoreLocked(store);
+            var current = EnsureStoreLoaded();
+            if (current.Providers.ContainsKey(provider))
+            {
+                var nextProviders = new Dictionary<string, ProviderToken>(current.Providers, StringComparer.Ordinal);
+                nextProviders.Remove(provider);
+                SaveStore(new TokenStoreFile { Providers = nextProviders });
+            }
+            ProviderAuthChanged?.Invoke(provider);
         }
         finally
         {
@@ -250,20 +262,26 @@ public sealed class CloudPhotoAuth : IDisposable
 
     public string? GetAccount(string provider) => GetTokenSummary(provider)?.Account;
 
+    public string GetSessionStamp(string provider)
+    {
+        var tok = GetTokenSummary(provider);
+        if (tok is null) return "none";
+        var secretTail = string.IsNullOrEmpty(tok.RefreshToken) ? tok.AccessToken : tok.RefreshToken;
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"{tok.ClientId}\0{secretTail}\0{tok.Account ?? ""}"));
+        return Convert.ToHexString(hash[..8]).ToLowerInvariant();
+    }
+
     private ProviderToken? GetTokenSummary(string provider)
     {
         if (!IsOAuthProvider(provider)) return null;
         var clientId = GetClientId(provider);
         if (string.IsNullOrWhiteSpace(clientId)) return null;
 
-        lock (_gate)
-        {
-            var store = LoadStoreNoLock();
-            if (!store.Providers.TryGetValue(provider, out var tok)) return null;
-            if (!string.Equals(tok.ClientId, clientId, StringComparison.Ordinal)) return null;
-            if (string.IsNullOrEmpty(tok.AccessToken) && string.IsNullOrEmpty(tok.RefreshToken)) return null;
-            return tok;
-        }
+        var store = EnsureStoreLoaded();
+        if (!store.Providers.TryGetValue(provider, out var tok)) return null;
+        if (!string.Equals(tok.ClientId, clientId, StringComparison.Ordinal)) return null;
+        if (string.IsNullOrEmpty(tok.AccessToken) && string.IsNullOrEmpty(tok.RefreshToken)) return null;
+        return tok;
     }
 
     public async Task<string?> GetAccessTokenAsync(string provider, bool forceRefresh, CancellationToken ct)
@@ -276,7 +294,7 @@ public sealed class CloudPhotoAuth : IDisposable
             var clientId = GetClientId(provider);
             if (string.IsNullOrWhiteSpace(clientId)) return null;
 
-            var store = LoadStoreLocked();
+            var store = EnsureStoreLoaded();
             if (!store.Providers.TryGetValue(provider, out var tok)) return null;
             if (!string.Equals(tok.ClientId, clientId, StringComparison.Ordinal))
                 return null;
@@ -300,8 +318,12 @@ public sealed class CloudPhotoAuth : IDisposable
                 fields["client_secret"] = secret;
 
             var refreshed = await ExchangeTokenAsync(provider, fields, clientId, tok.RefreshToken, tok.Account, ct);
-            store.Providers[provider] = refreshed;
-            SaveStoreLocked(store);
+            var latest = EnsureStoreLoaded();
+            var nextProviders = new Dictionary<string, ProviderToken>(latest.Providers, StringComparer.Ordinal)
+            {
+                [provider] = refreshed,
+            };
+            SaveStore(new TokenStoreFile { Providers = nextProviders });
             return refreshed.AccessToken;
         }
         finally
@@ -398,17 +420,21 @@ public sealed class CloudPhotoAuth : IDisposable
         return null;
     }
 
-    private TokenStoreFile LoadStoreNoLock()
+    private TokenStoreFile EnsureStoreLoaded()
     {
-        if (_store is not null) return _store;
-        return LoadStoreFromDisk();
-    }
+        TokenStoreFile? existing;
+        lock (_gate)
+        {
+            existing = _store;
+        }
+        if (existing is not null) return existing;
 
-    private TokenStoreFile LoadStoreLocked()
-    {
-        var loaded = _store ?? LoadStoreFromDisk();
-        lock (_gate) _store = loaded;
-        return loaded;
+        var loaded = LoadStoreFromDisk();
+        lock (_gate)
+        {
+            _store ??= loaded;
+            return _store;
+        }
     }
 
     private TokenStoreFile LoadStoreFromDisk()
@@ -428,7 +454,7 @@ public sealed class CloudPhotoAuth : IDisposable
         }
     }
 
-    private void SaveStoreLocked(TokenStoreFile store)
+    private void SaveStore(TokenStoreFile store)
     {
         var temp = CredentialPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         var dir = Path.GetDirectoryName(CredentialPath);

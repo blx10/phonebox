@@ -31,6 +31,8 @@ function formatClockNow() {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+const MANIFEST_RETRY_MS = 30_000;
+
 W.photos = {
   needs: ['tick'],
   create(box, { w, o }) {
@@ -43,7 +45,9 @@ W.photos = {
     let visibleElapsedMs = 0;
     let lastTickAt = Date.now();
     let lastManifestAt = 0;
+    let nextManifestRetryAt = 0;
     let manifestBusy = false;
+    let slideBusy = false;
     let slideAbort = null;
     let manifestAbort = null;
     let slideSeq = 0;
@@ -133,6 +137,38 @@ W.photos = {
       meta.hidden = !capText && parts.length === 0;
     }
 
+    function cancelPendingSlide() {
+      ++slideSeq;
+      if (slideAbort) {
+        slideAbort.abort();
+        slideAbort = null;
+      }
+      slideBusy = false;
+      downloadingCloud = false;
+    }
+
+    function clearDisplayMedia() {
+      cancelPendingSlide();
+      layers.forEach((l) => {
+        l.classList.remove('on', 'exit');
+        l.firstChild.removeAttribute('src');
+      });
+      layerBlobs.forEach((u) => {
+        if (u) {
+          try { URL.revokeObjectURL(u); } catch (_) {}
+        }
+      });
+      layerBlobs = [null, null];
+      if (bgImg) bgImg.removeAttribute('src');
+      if (bgBlob) {
+        try { URL.revokeObjectURL(bgBlob); } catch (_) {}
+        bgBlob = null;
+      }
+      playlist = [];
+      index = -1;
+      visibleElapsedMs = 0;
+    }
+
     function showEmpty(message) {
       layers.forEach((l) => l.classList.remove('on', 'exit'));
       meta.hidden = true;
@@ -155,90 +191,118 @@ W.photos = {
 
       const mySeq = ++slideSeq;
       if (slideAbort) slideAbort.abort();
-      slideAbort = new AbortController();
+      const myAbort = new AbortController();
+      slideAbort = myAbort;
+      slideBusy = true;
 
-      const maxAttempts = Math.min(playlist.length, 8);
-      const mayDownloadFromCloud = (feed?.cloudOnlyCount > 0) || (o.provider && o.provider !== 'local');
-      if (mayDownloadFromCloud && !emptyEl.hidden) {
-        emptyEl.textContent = 'Downloading photo from cloud…';
-      }
-
-      for (let attempts = 0; attempts < maxAttempts; attempts++) {
-        if (order === 'shuffle' && index + step >= playlist.length && attempts === 0) {
-          playlist = shuffleArray(feed?.photos || playlist);
-          index = -1;
+      try {
+        const maxAttempts = Math.min(playlist.length, 8);
+        const mayDownloadFromCloud = (feed?.cloudOnlyCount > 0) || (o.provider && o.provider !== 'local');
+        if (mayDownloadFromCloud && !emptyEl.hidden) {
+          emptyEl.textContent = 'Downloading photo from cloud…';
         }
-        index = ((index + step) % playlist.length + playlist.length) % playlist.length;
-        const item = playlist[index];
 
-        let blobUrl = null;
-        let dlTimer = null;
-        try {
-          if (mayDownloadFromCloud) {
-            dlTimer = setTimeout(() => {
-              if (!destroyed && mySeq === slideSeq) {
-                downloadingCloud = true;
-                updateBadges();
+        for (let attempts = 0; attempts < maxAttempts; attempts++) {
+          if (order === 'shuffle' && index + step >= playlist.length && attempts === 0) {
+            playlist = shuffleArray(feed?.photos || playlist);
+            index = -1;
+          }
+          index = ((index + step) % playlist.length + playlist.length) % playlist.length;
+          const item = playlist[index];
+
+          let blobUrl = null;
+          let dlTimer = null;
+          try {
+            if (mayDownloadFromCloud) {
+              dlTimer = setTimeout(() => {
+                if (!destroyed && mySeq === slideSeq) {
+                  downloadingCloud = true;
+                  updateBadges();
+                }
+              }, 350);
+            }
+            blobUrl = await fetchPhotoBlobUrl(item.url, myAbort.signal);
+            if (dlTimer) { clearTimeout(dlTimer); dlTimer = null; }
+            if (downloadingCloud) { downloadingCloud = false; updateBadges(); }
+            if (destroyed || mySeq !== slideSeq) {
+              URL.revokeObjectURL(blobUrl);
+              return;
+            }
+
+            const nextIdx = layerCursor ^ 1;
+            const prevIdx = layerCursor;
+            const nextLayer = layers[nextIdx];
+            const prevLayer = layers[prevIdx];
+            const nextImg = nextLayer.firstChild;
+
+            await new Promise((resolve, reject) => {
+              const probe = new Image();
+              const onAbort = () => {
+                probe.onload = null;
+                probe.onerror = null;
+                probe.src = '';
+                reject(new DOMException('Aborted', 'AbortError'));
+              };
+              if (myAbort.signal.aborted) {
+                onAbort();
+                return;
               }
-            }, 350);
-          }
-          blobUrl = await fetchPhotoBlobUrl(item.url, slideAbort.signal);
-          if (dlTimer) { clearTimeout(dlTimer); dlTimer = null; }
-          if (downloadingCloud) { downloadingCloud = false; updateBadges(); }
-          if (destroyed || mySeq !== slideSeq) {
-            URL.revokeObjectURL(blobUrl);
-            return;
-          }
+              myAbort.signal.addEventListener('abort', onAbort, { once: true });
+              probe.onload = () => {
+                myAbort.signal.removeEventListener('abort', onAbort);
+                resolve();
+              };
+              probe.onerror = () => {
+                myAbort.signal.removeEventListener('abort', onAbort);
+                reject(new Error('Decode failed'));
+              };
+              probe.src = blobUrl;
+            });
+            if (destroyed || mySeq !== slideSeq) {
+              URL.revokeObjectURL(blobUrl);
+              return;
+            }
 
-          const nextIdx = layerCursor ^ 1;
-          const prevIdx = layerCursor;
-          const nextLayer = layers[nextIdx];
-          const prevLayer = layers[prevIdx];
-          const nextImg = nextLayer.firstChild;
-
-          await new Promise((resolve, reject) => {
-            nextImg.onload = () => resolve();
-            nextImg.onerror = () => reject(new Error('Decode failed'));
             nextImg.src = blobUrl;
-          });
-          if (destroyed || mySeq !== slideSeq) {
-            URL.revokeObjectURL(blobUrl);
+            if (bgImg) {
+              bgImg.src = blobUrl;
+              const oldBg = bgBlob;
+              bgBlob = null;
+              revokeLater(oldBg);
+            }
+
+            const oldBlob = layerBlobs[nextIdx];
+            layerBlobs[nextIdx] = blobUrl;
+            revokeLater(oldBlob);
+
+            nextLayer.classList.remove('exit', 'on');
+            void nextLayer.offsetWidth; // restart Ken Burns / slide animation cleanly
+            nextLayer.classList.add('on');
+            prevLayer.classList.remove('on');
+            if (prevLayer.firstChild.getAttribute('src')) prevLayer.classList.add('exit');
+
+            layerCursor = nextIdx;
+            emptyEl.hidden = true;
+            updateBadges();
+            updateMeta(item);
+            visibleElapsedMs = 0;
             return;
+          } catch (err) {
+            if (dlTimer) { clearTimeout(dlTimer); dlTimer = null; }
+            if (downloadingCloud) { downloadingCloud = false; updateBadges(); }
+            if (blobUrl) URL.revokeObjectURL(blobUrl);
+            if (err?.name === 'AbortError' || destroyed || mySeq !== slideSeq) return;
+            step = 1;
           }
+        }
 
-          if (bgImg) {
-            bgImg.src = blobUrl;
-            const oldBg = bgBlob;
-            bgBlob = null;
-            revokeLater(oldBg);
-          }
-
-          const oldBlob = layerBlobs[nextIdx];
-          layerBlobs[nextIdx] = blobUrl;
-          revokeLater(oldBlob);
-
-          nextLayer.classList.remove('exit', 'on');
-          void nextLayer.offsetWidth; // restart Ken Burns / slide animation cleanly
-          nextLayer.classList.add('on');
-          prevLayer.classList.remove('on');
-          if (prevLayer.firstChild.getAttribute('src')) prevLayer.classList.add('exit');
-
-          layerCursor = nextIdx;
-          emptyEl.hidden = true;
-          updateBadges();
-          updateMeta(item);
-          visibleElapsedMs = 0;
-          return;
-        } catch (err) {
-          if (dlTimer) { clearTimeout(dlTimer); dlTimer = null; }
-          if (downloadingCloud) { downloadingCloud = false; updateBadges(); }
-          if (blobUrl) URL.revokeObjectURL(blobUrl);
-          if (err?.name === 'AbortError' || destroyed || mySeq !== slideSeq) return;
-          step = 1;
+        showEmpty('Photos could not be loaded');
+      } finally {
+        if (mySeq === slideSeq) {
+          slideBusy = false;
+          if (slideAbort === myAbort) slideAbort = null;
         }
       }
-
-      showEmpty('Photos could not be loaded');
     }
 
     async function loadManifest(forceRefresh = false) {
@@ -274,16 +338,17 @@ W.photos = {
 
         feed = data;
         lastManifestAt = Date.now();
+        nextManifestRetryAt = 0;
         updateBadges();
 
         const items = Array.isArray(data.photos) ? data.photos : [];
         if (!data.configured) {
-          playlist = [];
+          clearDisplayMedia();
           showEmpty(data.error || 'Choose a photo album or folder in PhoneBox Settings');
           return;
         }
         if (items.length === 0) {
-          playlist = [];
+          clearDisplayMedia();
           showEmpty(data.error || 'No photos found in the selected source');
           return;
         }
@@ -300,6 +365,7 @@ W.photos = {
         }
       } catch (err) {
         if (err?.name === 'AbortError' || destroyed) return;
+        nextManifestRetryAt = Date.now() + MANIFEST_RETRY_MS;
         if (playlist.length === 0) {
           showEmpty('Waiting for photo source from the agent');
         }
@@ -358,11 +424,11 @@ W.photos = {
         const visible = isVisible();
         if (!visible) return;
 
-        if (!manifestBusy && now - lastManifestAt >= 15 * 60_000) {
+        if (!manifestBusy && now >= nextManifestRetryAt && (lastManifestAt === 0 || now - lastManifestAt >= 15 * 60_000)) {
           loadManifest(false);
         }
 
-        if (!paused && playlist.length > 1) {
+        if (!paused && !slideBusy && playlist.length > 1) {
           visibleElapsedMs += dt;
           if (visibleElapsedMs >= intervalSec * 1000) {
             visibleElapsedMs = 0;
@@ -372,18 +438,8 @@ W.photos = {
       },
       destroy() {
         destroyed = true;
-        if (slideAbort) slideAbort.abort();
+        clearDisplayMedia();
         if (manifestAbort) manifestAbort.abort();
-        layerBlobs.forEach((u) => {
-          if (u) {
-            try { URL.revokeObjectURL(u); } catch (_) {}
-          }
-        });
-        layerBlobs = [null, null];
-        if (bgBlob) {
-          try { URL.revokeObjectURL(bgBlob); } catch (_) {}
-          bgBlob = null;
-        }
       },
     };
   },

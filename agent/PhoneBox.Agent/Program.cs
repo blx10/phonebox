@@ -365,12 +365,13 @@ app.MapGet("/api/photos/oauth/connect/{provider}", (string provider, CloudPhotoA
         return Results.BadRequest(new { error = ex.Message });
     }
 });
-app.MapPost("/api/photos/oauth/disconnect/{provider}", async (string provider, CloudPhotoAuth auth, CancellationToken ct) =>
+app.MapPost("/api/photos/oauth/disconnect/{provider}", async (string provider, CloudPhotoAuth auth, CloudPhotoService photos, CancellationToken ct) =>
 {
     await auth.DisconnectAsync(provider, ct);
+    photos.InvalidateProvider(provider);
     return Results.Ok(new { ok = true });
 });
-app.MapGet("/api/photos/oauth/callback/{provider}", async (string provider, string? state, string? code, string? error, CloudPhotoAuth auth, CancellationToken ct) =>
+app.MapGet("/api/photos/oauth/callback/{provider}", async (string provider, string? state, string? code, string? error, CloudPhotoAuth auth, CloudPhotoService photos, CancellationToken ct) =>
 {
     if (!string.IsNullOrEmpty(error))
     {
@@ -380,6 +381,7 @@ app.MapGet("/api/photos/oauth/callback/{provider}", async (string provider, stri
     if (string.IsNullOrEmpty(state) || string.IsNullOrEmpty(code))
         return Results.BadRequest("Missing OAuth state or code.");
     var (ok, err) = await auth.CompleteAsync(provider, state, code, ct);
+    if (ok) photos.InvalidateProvider(provider);
     return ok
         ? Results.Text($"{CloudPhotoAuth.ProviderDisplayName(provider)} connected. Return to PhoneBox settings; this tab can be closed.", "text/plain")
         : Results.BadRequest(err ?? "Sign-in failed.");

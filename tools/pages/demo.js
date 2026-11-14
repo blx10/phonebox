@@ -628,11 +628,37 @@
           : DEMO_PHOTO_ROOTS.map((r) => ({ id: r.path, name: r.name, kind: 'folder', path: r.path }));
         return json({ ok: true, provider: prov, currentPath: req.path || null, parentPath: null, entries: list });
       }
+      if (prov === 'google') {
+        return json({
+          ok: true, provider: prov, currentPath: req.path || 'My Drive', parentPath: null,
+          entries: [
+            { id: 'google-fav', name: 'Travel Favorites', kind: 'folder', itemCount: 42, path: 'My Drive/Travel Favorites' },
+            { id: 'google-cam', name: 'Camera Roll', kind: 'folder', itemCount: 120, path: 'My Drive/Camera Roll' },
+          ],
+        });
+      }
+      if (prov === 'onedrive') {
+        if (req.parentId === 'albums') {
+          return json({
+            ok: true, provider: prov, currentPath: 'Photo Albums', parentPath: '/',
+            entries: [
+              { id: 'od-alb-1', name: 'Summer Trips', kind: 'album', itemCount: 24, path: 'Summer Trips' },
+            ],
+          });
+        }
+        return json({
+          ok: true, provider: prov, currentPath: req.path || '/', parentPath: null,
+          entries: [
+            { id: 'onedrive-cam', name: 'Pictures / Photos', kind: 'folder', itemCount: 120, path: '/Pictures/Photos' },
+            { id: 'albums', name: 'Photo Albums', kind: 'collection', itemCount: 3, path: 'Photo Albums' },
+          ],
+        });
+      }
       return json({
         ok: true, provider: prov, currentPath: req.path || '/', parentPath: null,
         entries: [
-          { id: `${prov}-fav`, name: 'Travel Favorites', kind: 'album', itemCount: 42, path: '/Travel Favorites' },
-          { id: `${prov}-cam`, name: 'Camera Roll', kind: 'folder', itemCount: 120, path: '/Pictures/Camera Roll' },
+          { id: '/Camera Uploads', name: 'Camera Uploads', kind: 'folder', itemCount: 120, path: '/Camera Uploads' },
+          { id: '/Travel Favorites', name: 'Travel Favorites', kind: 'folder', itemCount: 42, path: '/Travel Favorites' },
         ],
       });
     }
@@ -640,12 +666,20 @@
       const opts = (parse(body) || {}).options || {};
       const feed = demoPhotoFeed(opts);
       const cloudCount = feed.cloudOnlyCount || 0;
-      if (!feed.configured) return json({ ok: false, message: feed.error, count: 0, sourceLabel: '', cloudOnlyCount: 0 });
-      if (feed.error) return json({ ok: false, message: feed.error, count: 0, sourceLabel: feed.sourceLabel, cloudOnlyCount: cloudCount });
+      const prov = opts.provider || 'local';
+      const f = (opts.folder || '').trim();
+      const isLocalDir = (p) => /^\/(?:Users|home|Volumes|mnt|media|var|private|tmp)(?:\/|$)/.test(p)
+        || p === '~' || p.startsWith('~/') || p.startsWith('~\\')
+        || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+      const remoteStream = prov === 'nextcloud'
+        || (prov === 'icloud' && !!(opts.shareUrl || '').trim())
+        || (['onedrive', 'google', 'dropbox'].includes(prov) && !!(opts.albumId || (!isLocalDir(f) && f)));
+      if (!feed.configured) return json({ ok: false, message: feed.error, count: 0, sourceLabel: '', cloudOnlyCount: 0, remoteStream });
+      if (feed.error) return json({ ok: false, message: feed.error, count: 0, sourceLabel: feed.sourceLabel, cloudOnlyCount: cloudCount, remoteStream });
       const msg = cloudCount > 0 && opts.downloadCloudFiles
         ? `Found ${feed.photos.length} photos in ${feed.sourceLabel} (${cloudCount} in cloud — photos will be downloaded onto this computer as they are shown)`
         : `Found ${feed.photos.length} photos in ${feed.sourceLabel}`;
-      return json({ ok: true, message: msg, count: feed.photos.length, sourceLabel: feed.sourceLabel, cloudOnlyCount: cloudCount });
+      return json({ ok: true, message: msg, count: feed.photos.length, sourceLabel: feed.sourceLabel, cloudOnlyCount: cloudCount, remoteStream });
     }
     if (path.startsWith('/api/photos/image/')) {
       const id = decodeURIComponent(path.slice('/api/photos/image/'.length));

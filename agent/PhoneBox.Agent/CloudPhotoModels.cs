@@ -289,7 +289,8 @@ public sealed record PhotoTestResponse(
     string Message,
     int Count,
     string SourceLabel,
-    int CloudOnlyCount = 0
+    int CloudOnlyCount = 0,
+    bool RemoteStream = false
 );
 
 public sealed record PhotoProviderStatus(

@@ -878,4 +878,398 @@ public sealed class CloudPhotoTests
         Assert.Equal("image/jpeg", okBytes!.Value.Mime);
         Assert.Equal(2, readerCalls);
     }
+
+    [Fact]
+    public async Task LocalFileServingRejectsIntermediateDirectorySymlinkAfterFeedDiscovery()
+    {
+        using var env = new TempPhotoEnv();
+        var outsideDir = Directory.CreateDirectory(Path.Combine(env.RootDir, "outside")).FullName;
+        File.WriteAllBytes(Path.Combine(outsideDir, "secret.png"), MinimalPng);
+
+        var subDir = Directory.CreateDirectory(Path.Combine(env.PhotoDir, "sub")).FullName;
+        File.WriteAllBytes(Path.Combine(subDir, "secret.png"), MinimalPng);
+
+        var store = env.WriteConfig(new { });
+        using var auth = new CloudPhotoAuth(store, new AgentEndpoint(19991));
+        using var service = new CloudPhotoService(store, auth, new HttpClient(), env.CacheDir);
+
+        var opts = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(new
+        {
+            provider = "local",
+            folder = env.PhotoDir,
+            subfolders = true,
+        }));
+        var feed = await service.GetPreviewFeedAsync(new PhotoPreviewRequest(opts), default);
+        var item = Assert.Single(feed.Photos);
+
+        var before = await service.GetPhotoBytesAsync(item.Id, default);
+        Assert.NotNull(before);
+
+        Directory.Delete(subDir, recursive: true);
+        var symlinkCreated = false;
+        try
+        {
+            Directory.CreateSymbolicLink(subDir, outsideDir);
+            symlinkCreated = true;
+        }
+        catch { }
+
+        if (symlinkCreated)
+        {
+            Assert.Null(await service.GetPhotoBytesAsync(item.Id, default));
+            var browse = await service.BrowseAsync(new PhotoBrowseRequest("local", null, env.PhotoDir, null, null), default);
+            Assert.DoesNotContain(browse.Entries, e => e.Name == "sub");
+        }
+    }
+
+    [Fact]
+    public async Task CloudProvidersSupportCollectionBrowseAndPagedFeedsAndRejectUntrustedNextLink()
+    {
+        using var env = new TempPhotoEnv();
+        var store = env.WriteConfig(new
+        {
+            cloudPhotos = new
+            {
+                oneDriveClientId = "od-client",
+                googleClientId = "gd-client",
+            }
+        });
+        File.WriteAllText(store.Path + ".photos.json", JsonSerializer.Serialize(new
+        {
+            providers = new Dictionary<string, object>
+            {
+                ["onedrive"] = new { clientId = "od-client", accessToken = "ok-od", refreshToken = "rf-od", expiresAtMs = 9999999999999L, account = "od@example.com" },
+                ["google"] = new { clientId = "gd-client", accessToken = "ok-gd", refreshToken = "rf-gd", expiresAtMs = 9999999999999L, account = "gd@example.com" },
+            }
+        }));
+
+        var evilRequested = false;
+        var sawGooglePage2 = false;
+        using var mockHttp = new HttpClient(new StubHttpHandler((req, _) =>
+        {
+            var url = req.RequestUri!.AbsoluteUri;
+            if (req.RequestUri.Host == "evil.example")
+            {
+                evilRequested = true;
+                return Task.FromResult(JsonResp("{}"));
+            }
+
+            if (req.RequestUri.Host == "graph.microsoft.com")
+            {
+                if (url.Contains("/bundles"))
+                    return Task.FromResult(JsonResp("""{"value":[{"id":"alb-1","name":"Trips","bundle":{"album":{},"childCount":2}}]}"""));
+
+                if (url.Contains("/items/alb-untrusted/children"))
+                {
+                    return Task.FromResult(JsonResp("""
+                    {
+                      "value": [
+                        { "id": "u1", "name": "one.jpg", "file": { "mimeType": "image/jpeg" }, "image": {} }
+                      ],
+                      "@odata.nextLink": "https://evil.example/steal"
+                    }
+                    """));
+                }
+
+                if (url.Contains("skiptoken=p2"))
+                {
+                    return Task.FromResult(JsonResp("""
+                    {
+                      "value": [
+                        { "id": "p2", "name": "second.jpg", "file": { "mimeType": "image/jpeg" }, "image": {} }
+                      ]
+                    }
+                    """));
+                }
+
+                if (url.Contains("/items/alb-paged/children"))
+                {
+                    return Task.FromResult(JsonResp("""
+                    {
+                      "value": [
+                        { "id": "p1", "name": "first.jpg", "file": { "mimeType": "image/jpeg" }, "image": {} }
+                      ],
+                      "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/drive/items/alb-paged/children?skiptoken=p2"
+                    }
+                    """));
+                }
+
+                return Task.FromResult(JsonResp("""{"value":[]}"""));
+            }
+
+            if (req.RequestUri.Host == "www.googleapis.com")
+            {
+                if (url.Contains("pageToken=tok-2"))
+                {
+                    sawGooglePage2 = true;
+                    return Task.FromResult(JsonResp("""
+                    {
+                      "files": [
+                        { "id": "gd-2", "name": "page2.jpg", "mimeType": "image/jpeg" }
+                      ]
+                    }
+                    """));
+                }
+                return Task.FromResult(JsonResp("""
+                {
+                  "files": [
+                    { "id": "gd-1", "name": "page1.jpg", "mimeType": "image/jpeg" }
+                  ],
+                  "nextPageToken": "tok-2"
+                }
+                """));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }));
+
+        using var auth = new CloudPhotoAuth(store, new AgentEndpoint(19990), mockHttp);
+        using var service = new CloudPhotoService(store, auth, mockHttp, env.CacheDir);
+
+        // OneDrive root browse returns "Photo Albums" as non-selectable collection
+        var rootBrowse = await service.BrowseAsync(new PhotoBrowseRequest("onedrive", null, null, null, null), default);
+        Assert.True(rootBrowse.Ok);
+        var albumsEntry = Assert.Single(rootBrowse.Entries, e => e.Id == "albums");
+        Assert.Equal("collection", albumsEntry.Kind);
+
+        // OneDrive TestSourceAsync marks remote streams accurately vs local folders
+        var remoteTest = await service.TestSourceAsync(new PhotoTestRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"provider":"onedrive","albumId":"alb-paged"}""")), default);
+        Assert.True(remoteTest.Ok);
+        Assert.True(remoteTest.RemoteStream);
+        Assert.Equal(2, remoteTest.Count);
+
+        var localTest = await service.TestSourceAsync(new PhotoTestRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(JsonSerializer.Serialize(new { provider = "local", folder = env.PhotoDir }))), default);
+        Assert.False(localTest.RemoteStream);
+
+        // Untrusted @odata.nextLink host is ignored and never queried
+        var untrustedFeed = await service.GetPreviewFeedAsync(new PhotoPreviewRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"provider":"onedrive","albumId":"alb-untrusted"}""")), default);
+        Assert.Single(untrustedFeed.Photos);
+        Assert.False(evilRequested);
+
+        // Google Drive follows nextPageToken
+        var gdFeed = await service.GetPreviewFeedAsync(new PhotoPreviewRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"provider":"google","albumId":"gd-paged"}""")), default);
+        Assert.True(sawGooglePage2);
+        Assert.Equal(2, gdFeed.Photos.Count);
+    }
+
+    [Fact]
+    public async Task OAuthDisconnectInvalidatesInFlightRefreshesPurgesDiskCacheAndIsolatesSessions()
+    {
+        using var env = new TempPhotoEnv();
+        var store = env.WriteConfig(new
+        {
+            cloudPhotos = new { dropboxClientId = "db-client" },
+            pages = new[]
+            {
+                new
+                {
+                    id = "p1", title = "Photos", enabled = true,
+                    widgets = new[]
+                    {
+                        new
+                        {
+                            id = "db1", type = "photos", x = 0, y = 0, w = 6, h = 4,
+                            options = new { provider = "dropbox", folder = "/" }
+                        }
+                    }
+                }
+            }
+        });
+
+        var currentAccount = "acctA@example.com";
+        var currentToken = "tok-A";
+        var inFlightGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inFlightEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gateRequests = false;
+
+        using var mockHttp = new HttpClient(new StubHttpHandler(async (req, ct) =>
+        {
+            var url = req.RequestUri!.AbsoluteUri;
+            if (req.RequestUri.Host == "api.dropboxapi.com" && url.EndsWith("/oauth2/token"))
+            {
+                return JsonResp(JsonSerializer.Serialize(new
+                {
+                    access_token = currentToken,
+                    refresh_token = "rf-" + currentToken,
+                    expires_in = 3600,
+                }));
+            }
+            if (req.RequestUri.Host == "api.dropboxapi.com" && url.EndsWith("/users/get_current_account"))
+            {
+                return JsonResp(JsonSerializer.Serialize(new
+                {
+                    email = currentAccount,
+                    name = new { display_name = currentAccount },
+                }));
+            }
+            if (req.RequestUri.Host == "api.dropboxapi.com" && url.EndsWith("/list_folder"))
+            {
+                if (gateRequests)
+                {
+                    inFlightEntered.TrySetResult();
+                    await inFlightGate.Task.WaitAsync(ct);
+                }
+                return JsonResp("""
+                {
+                  "entries": [
+                    { ".tag": "file", "name": "shared.png", "path_lower": "/shared.png", "rev": "r1" }
+                  ],
+                  "has_more": false
+                }
+                """);
+            }
+            if (req.RequestUri.Host == "content.dropboxapi.com")
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(MinimalPng) };
+            }
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }));
+
+        using var auth = new CloudPhotoAuth(store, new AgentEndpoint(19989), mockHttp);
+        using var service = new CloudPhotoService(store, auth, mockHttp, env.CacheDir);
+
+        async Task ConnectCurrentAsync()
+        {
+            var (authUrl, _) = auth.Begin("dropbox");
+            var state = QueryHelpers.ParseQuery(new Uri(authUrl).Query)["state"].ToString();
+            var (ok, err) = await auth.CompleteAsync("dropbox", state, "code-" + currentToken, default);
+            Assert.True(ok, err);
+        }
+
+        // Session A connects, fetches feed + image into disk cache
+        await ConnectCurrentAsync();
+        var stampA = auth.GetSessionStamp("dropbox");
+        var feedA = await service.GetWidgetFeedAsync("db1", refresh: true, default);
+        var itemA = Assert.Single(feedA.Photos);
+        var imgA = await service.GetPhotoBytesAsync(itemA.Id, default);
+        Assert.NotNull(imgA);
+        Assert.Single(Directory.GetFiles(env.CacheDir, "*.bin"));
+
+        // Disconnect clears cached manifest, item lookup, and disk cache
+        await auth.DisconnectAsync("dropbox", default);
+        Assert.Null(await service.GetPhotoBytesAsync(itemA.Id, default));
+        Assert.Empty(Directory.GetFiles(env.CacheDir, "*.bin"));
+
+        // Reconnect session B -> session stamp + item IDs differ, old session A item ID stays unusable
+        currentAccount = "acctB@example.com";
+        currentToken = "tok-B";
+        await ConnectCurrentAsync();
+        var stampB = auth.GetSessionStamp("dropbox");
+        Assert.NotEqual(stampA, stampB);
+
+        var feedB = await service.GetWidgetFeedAsync("db1", refresh: true, default);
+        var itemB = Assert.Single(feedB.Photos);
+        Assert.NotEqual(itemA.Id, itemB.Id);
+        Assert.Null(await service.GetPhotoBytesAsync(itemA.Id, default));
+
+        // Start a refresh before DisconnectAsync, let DisconnectAsync run mid-flight, then release HTTP
+        gateRequests = true;
+        var inFlightTask = service.GetWidgetFeedAsync("db1", refresh: true, default);
+        await inFlightEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await auth.DisconnectAsync("dropbox", default);
+        inFlightGate.TrySetResult();
+
+        var afterDisconnectFeed = await inFlightTask;
+        Assert.Empty(afterDisconnectFeed.Photos);
+        Assert.Null(await service.GetPhotoBytesAsync(itemB.Id, default));
+    }
+
+    private sealed class StalledHttpContent(TaskCompletionSource started) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => Task.CompletedTask;
+
+        protected override Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<Stream>(new StalledStream(started));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
+    private sealed class StalledStream(TaskCompletionSource started) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task RemoteBodyReadTimeoutAbortsStalledDownloadAndLeavesNoTempFiles()
+    {
+        using var env = new TempPhotoEnv();
+        var store = env.WriteConfig(new { cloudPhotos = new { oneDriveClientId = "od-client" } });
+        File.WriteAllText(store.Path + ".photos.json", JsonSerializer.Serialize(new
+        {
+            providers = new Dictionary<string, object>
+            {
+                ["onedrive"] = new { clientId = "od-client", accessToken = "ok-od", refreshToken = "rf-od", expiresAtMs = 9999999999999L }
+            }
+        }));
+
+        var streamStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var mockHttp = new HttpClient(new StubHttpHandler((req, _) =>
+        {
+            if (req.RequestUri!.Host == "graph.microsoft.com" && req.RequestUri.AbsoluteUri.Contains("/content"))
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StalledHttpContent(streamStarted) });
+            }
+            if (req.RequestUri.Host == "graph.microsoft.com")
+            {
+                return Task.FromResult(JsonResp("""
+                {
+                  "value": [
+                    { "id": "stall-1", "name": "stalled.jpg", "file": { "mimeType": "image/jpeg" }, "image": {} }
+                  ]
+                }
+                """));
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }));
+
+        using var auth = new CloudPhotoAuth(store, new AgentEndpoint(19988), mockHttp);
+        using var service = new CloudPhotoService(
+            store,
+            auth,
+            mockHttp,
+            env.CacheDir,
+            bodyReadTimeout: TimeSpan.FromMilliseconds(150));
+
+        var feed = await service.GetPreviewFeedAsync(new PhotoPreviewRequest(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>("""{"provider":"onedrive","albumId":"alb-stall"}""")), default);
+        var item = Assert.Single(feed.Photos);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var bytes = await service.GetPhotoBytesAsync(item.Id, default);
+        sw.Stop();
+
+        Assert.True(streamStarted.Task.IsCompleted);
+        Assert.Null(bytes);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"Expected stalled stream to abort quickly, elapsed {sw.Elapsed}");
+        Assert.Empty(Directory.GetFiles(env.CacheDir, "*.tmp"));
+    }
 }
