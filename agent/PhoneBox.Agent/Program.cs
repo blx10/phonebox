@@ -94,7 +94,18 @@ app.MapGet("/api/controls/radio-logo", async (string? id, ControlDeck deck, Http
     return Results.Bytes(logo.Value.Bytes, logo.Value.Mime);
 });
 app.MapGet("/api/controls/spotify/state", async (SpotifyControl spotify, CancellationToken ct) => Results.Json(await spotify.Snapshot(ct)));
-app.MapPost("/api/controls/spotify/action/{action}", async (string action, string? id, SpotifyControl spotify, CancellationToken ct) => Results.Json(await spotify.Act(action, id, ct)));
+app.MapPost("/api/controls/spotify/action/{action}", async (string action, string? id, SpotifyControl spotify, ControlDeck deck, CancellationToken ct) =>
+{
+    var res = action is "play-queued" or "playlist"
+        ? await deck.RunWithMediaFocusAsync(async token =>
+        {
+            var result = await spotify.Act(action, id, token);
+            if (result.Ok) deck.StopAllRadios();
+            return result;
+        }, ct)
+        : await spotify.Act(action, id, ct);
+    return Results.Json(res);
+});
 app.MapGet("/api/controls/spotify/connect", (SpotifyControl spotify) =>
 { try { return Results.Json(new { url = spotify.Begin(), redirectUri = spotify.RedirectUri }); } catch (InvalidOperationException ex) { return Results.BadRequest(new { error = ex.Message }); } });
 app.MapPost("/api/controls/spotify/disconnect", async (SpotifyControl spotify, CancellationToken ct) => { await spotify.Disconnect(ct); return Results.Ok(); });
@@ -108,6 +119,24 @@ app.MapGet("/api/controls/spotify/callback", async (string? state, string? code,
 app.MapGet("/api/controls/obs", async (ObsMonitor obs, CancellationToken ct) => Results.Json(await obs.DeckSnapshot(ct)));
 app.MapPost("/api/controls/obs/{action}", async (string action, string? id, int? value, bool? enabled, ObsMonitor obs, CancellationToken ct) =>
     Results.Json(await obs.DeckAct(action, id, value, enabled, ct)));
+app.MapGet("/api/controls/radio-directory/countries", async (CancellationToken ct) =>
+{
+    try { return Results.Json(new { countries = await RadioBrowserDirectory.GetCountriesAsync(ct) }); }
+    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+    catch (Exception ex) { return Results.Json(new { ok = false, error = ex is RadioDirectoryUnavailableException ? ex.Message : "Radio directory is temporarily unavailable." }, statusCode: StatusCodes.Status502BadGateway); }
+});
+app.MapGet("/api/controls/radio-directory/stations", async (string? country, int? limit, CancellationToken ct) =>
+{
+    try { return Results.Json(new { stations = await RadioBrowserDirectory.GetStationsByCountryAsync(country ?? "", limit ?? 40, ct) }); }
+    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+    catch (Exception ex) { return Results.Json(new { ok = false, error = ex is RadioDirectoryUnavailableException ? ex.Message : "Radio directory is temporarily unavailable." }, statusCode: StatusCodes.Status502BadGateway); }
+});
+app.MapPost("/api/controls/radio-directory/check", async (HttpRequest req, CancellationToken ct) =>
+{
+    var body = await req.ReadFromJsonAsync<RadioCheckRequest>(new JsonSerializerOptions(JsonSerializerDefaults.Web), ct);
+    var results = await RadioBrowserDirectory.CheckStreamsAsync(body?.Stations ?? [], ct);
+    return Results.Json(new { results });
+});
 
 // The panel in a desktop browser (the layout editor's live preview, /panel/) calls the API as /agent/api/..., the same
 // path the phone uses; on the local port that is simply /api/... Routing runs after this, so it sees the new path.
@@ -155,7 +184,11 @@ app.Use(async (ctx, next) =>
     if (ctx.Request.Path.StartsWithSegments("/api/state") && ctx.Request.Headers.ContainsKey("X-PhoneBox-App"))
         Interlocked.Exchange(ref ApprovalStore.PhoneLastSeen, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
     if (ctx.Request.Headers.TryGetValue("X-PhoneBox-Device", out var device))
-        PhoneRegistry.Touch(device.ToString(), ctx.Request.Headers["X-PhoneBox-Model"].ToString(), ctx.Connection.LocalPort == Port ? "USB" : "Wi-Fi");
+    {
+        var problem = PhoneRegistry.Touch(device.ToString(), ctx.Request.Headers["X-PhoneBox-Model"].ToString(),
+            ctx.Connection.LocalPort == Port ? "USB" : "Wi-Fi", ctx.Request.Headers["X-PhoneBox-WebView"].ToString());
+        if (problem is not null) app.Logger.LogWarning("WebView: {Problem}", problem);
+    }
     if (ctx.Request.Headers.TryGetValue("X-PhoneBox-App", out var appVersion) && appVersion.ToString().Length is > 0 and < 32)
         UpdateService.AppVersion = appVersion.ToString();
     ctx.Response.Headers.CacheControl = "no-store";
@@ -238,7 +271,7 @@ app.MapGet("/api/settings", (ConfigStore cfg, HttpResponse res) =>
     return Results.Text(json, "application/json; charset=utf-8");
 });
 
-app.MapPut("/api/settings", async (HttpRequest req, ConfigStore cfg, ILogger<Program> log) =>
+app.MapPut("/api/settings", async (HttpRequest req, ConfigStore cfg, ControlDeck deck, ILogger<Program> log) =>
 {
     if (req.ContentType?.StartsWith("application/json") != true) return Results.StatusCode(415);
     using var r = new StreamReader(req.Body);
@@ -246,6 +279,8 @@ app.MapPut("/api/settings", async (HttpRequest req, ConfigStore cfg, ILogger<Pro
     var err = cfg.Save(await r.ReadToEndAsync(), expected);
     if (err == ConfigStore.Conflict) return Results.Json(new { error = err }, statusCode: StatusCodes.Status409Conflict);
     if (err is not null) return Results.BadRequest(new { error = err });
+    deck.StopDisabledControls();
+    deck.ReconcileRadios(waitForGate: true);
     log.LogInformation("settings saved");
     return Results.Ok(new { version = cfg.Version });
 });
@@ -270,6 +305,7 @@ app.MapGet("/api/info", (AdbReverse adb, ConfigStore cfg) => Results.Json(new
     devices = adb.AllDevices,
     appMissing = adb.MissingApp,
     usbProblem = adb.UsbProblem,
+    webviewProblem = WebViewDoctor.DiagnoseRecent(PhoneRegistry.All(), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
 }));
 
 app.MapPost("/api/phone/open", async (AdbReverse adb) => { await adb.OpenPanelAsync(); return Results.Ok(); });
@@ -331,7 +367,7 @@ object State(IServiceProvider sp, long? ev)
         evSeq = push.Seq,
         events = ev is { } since ? push.Since(since) : [],
         pc = sp.GetRequiredService<SystemMonitor>().Snapshot(),
-        media = sp.GetRequiredService<MediaMonitor>().Snapshot(),
+        media = sp.GetRequiredService<ControlDeck>().EffectiveMedia(sp.GetRequiredService<MediaMonitor>().Snapshot()),
         audio = sp.GetRequiredService<AudioControl>().Snapshot(),
         ping = sp.GetRequiredService<PingMonitor>().Snapshot(),
         rules = sp.GetRequiredService<RuleEngine>().Active(),
@@ -488,6 +524,8 @@ app.MapGet("/api/phones", (ConfigStore cfg) =>
         model = seen.TryGetValue(id, out var s) ? s.Model : null,
         lastSeen = s?.LastSeen,
         via = s?.Via,
+        webView = s?.WebView,
+        webviewProblem = s is null ? null : WebViewDoctor.Diagnose(s.WebView, s.Model),
         name = c.Phones.FirstOrDefault(p => p.Id == id)?.Name,
         pages = c.Phones.FirstOrDefault(p => p.Id == id)?.Pages,
     }).OrderByDescending(p => p.lastSeen ?? 0));
@@ -496,8 +534,20 @@ app.MapGet("/api/phones", (ConfigStore cfg) =>
 app.MapGet("/api/art", (MediaMonitor media) =>
     media.Art is { } art ? Results.File(art.Bytes, art.Mime) : Results.NotFound());
 
-app.MapPost("/api/media/{action}", async (string action, long? ms, MediaMonitor media) =>
-    await media.Control(action, ms) ? Results.Ok() : Results.BadRequest());
+app.MapPost("/api/media/{action}", async (string action, long? ms, MediaMonitor media, ControlDeck deck, CancellationToken ct) =>
+{
+    var outcome = await deck.RunWithMediaFocusAsync(async token =>
+    {
+        var sysSnapshot = media.Snapshot();
+        if (await deck.TryControlRadioMediaCoreAsync(action, sysSnapshot, token) is { } radioHandled)
+            return (Ok: radioHandled, Media: deck.EffectiveMedia(media.Snapshot()));
+        var starting = action is "next" or "prev" || (action == "playpause" && sysSnapshot?.Playing != true);
+        var ok = await media.Control(action, ms);
+        if (ok && starting) deck.StopAllRadios();
+        return (Ok: ok, Media: deck.EffectiveMedia(media.Snapshot()));
+    }, ct);
+    return outcome.Ok ? Results.Json(new { ok = true, media = outcome.Media }) : Results.BadRequest();
+});
 
 app.MapPost("/api/volume", (int? level, string? op, AudioControl audio) =>
 {
@@ -512,13 +562,15 @@ app.MapPost("/api/volume", (int? level, string? op, AudioControl audio) =>
     return ok ? Results.Json(audio.Snapshot()) : Results.BadRequest();
 });
 
-app.MapGet("/api/quotas", (QuotaMonitor q) => Results.Json(new { providers = q.Snapshot() }));
+app.MapGet("/api/quotas", (QuotaMonitor q) => Results.Json(new { providers = q.Snapshot(), overview = q.Overview() }));
 
 app.MapGet("/api/work", (SessionMonitor s, GitHubMonitor gh) => Results.Json(new
 {
     sessions = s.Snapshot(),
     github = gh.Snapshot(),
 }));
+
+app.MapGet("/api/proxy", (string? url, CancellationToken ct) => WidgetFeedProxy.FetchAsync(url, ct));
 
 app.MapGet("/api/procs", (ProcessMonitor procs, int? top) =>
 {

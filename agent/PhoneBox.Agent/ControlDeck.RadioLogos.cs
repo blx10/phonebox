@@ -173,7 +173,7 @@ internal sealed class RadioLogoCache : IDisposable
             var url = new Uri("https://opml.radiotime.com/Search.ashx?query=" + Uri.EscapeDataString(searchName) + "&types=station&render=json");
             using var resp = await SendPublicGetAsync(url, cts.Token);
             if (resp is null || !resp.IsSuccessStatusCode) return null;
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(cts.Token));
+            using var doc = JsonDocument.Parse(await ReadSearchAsync(resp, cts.Token));
             if (!doc.RootElement.TryGetProperty("body", out var body) || body.ValueKind != JsonValueKind.Array)
                 return null;
 
@@ -216,7 +216,7 @@ internal sealed class RadioLogoCache : IDisposable
                 + "&order=clickcount&reverse=true&limit=6&hidebroken=true");
             using var resp = await SendPublicGetAsync(url, cts.Token);
             if (resp is null || !resp.IsSuccessStatusCode) return null;
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(cts.Token));
+            using var doc = JsonDocument.Parse(await ReadSearchAsync(resp, cts.Token));
             if (doc.RootElement.ValueKind != JsonValueKind.Array) return null;
 
             foreach (var item in doc.RootElement.EnumerateArray())
@@ -314,6 +314,23 @@ internal sealed class RadioLogoCache : IDisposable
     /// <summary>
     /// Checks whether an IPv4 or IPv6 address is publicly routable (not loopback, private, link-local, or unspecified).
     /// </summary>
+    /// <summary>A directory search answer, at most 1 MB (the lookup is opt-in, but the answer still comes from the internet).</summary>
+    private static async Task<byte[]> ReadSearchAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        const int Max = 1 << 20;
+        if (resp.Content.Headers.ContentLength > Max) throw new HttpRequestException("Directory answer too large");
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[16 * 1024];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > Max) throw new HttpRequestException("Directory answer too large");
+            buffer.Write(chunk, 0, read);
+        }
+        return buffer.ToArray();
+    }
+
     internal static bool IsPublicIpAddress(IPAddress ip)
     {
         if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
@@ -327,6 +344,8 @@ internal sealed class RadioLogoCache : IDisposable
             if (b[0] == 169 && b[1] == 254) return false; // link-local
             if (b[0] == 172 && b[1] is >= 16 and <= 31) return false; // RFC 1918
             if (b[0] == 192 && b[1] == 168) return false; // RFC 1918
+            if (b[0] == 192 && b[1] == 0 && b[2] == 0) return false; // IETF protocol assignments
+            if (b[0] == 198 && b[1] is 18 or 19) return false; // benchmarking
             if (b[0] >= 224) return false; // multicast / reserved
             return true;
         }
