@@ -277,14 +277,19 @@ public sealed class ControlDeckTests
             using var deck = new ControlDeck(new ConfigStore(cfgPath), native, NullLogger<ControlDeck>.Instance);
             var idleSys = new MediaSnapshot("Spotify", "Track 1", "Artist 1", "Album 1", false, 0, 180_000, 1, true);
 
-            var playTask = Task.Run(() => deck.Act("action", "r-fenomen", "", null, null, null, default));
+            // Play and Snapshot block their threads on purpose; give each its own thread so a small CI runner's
+            // thread pool still has a worker left for EffectiveMedia.
+            var playTask = Task.Factory.StartNew(() => deck.Act("action", "r-fenomen", "", null, null, null, default),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
             Assert.True(native.PlayEnteredGate.Wait(TimeSpan.FromSeconds(2)));
 
             // Snapshot acquires ControlDeck._state inside Audio() and blocks on FakeRadioDeckNative._gate.
-            var snapTask = Task.Run(() => deck.Snapshot(default));
+            var snapTask = Task.Factory.StartNew(() => deck.Snapshot(default),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
             await Task.Delay(50);
 
-            var mediaTask = Task.Run(() => deck.EffectiveMedia(idleSys));
+            var mediaTask = Task.Factory.StartNew(() => deck.EffectiveMedia(idleSys),
+                CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             var completed = await Task.WhenAny(mediaTask, Task.Delay(TimeSpan.FromMilliseconds(500)));
             try
             {

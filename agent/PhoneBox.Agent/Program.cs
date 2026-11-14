@@ -156,7 +156,11 @@ app.Use(async (ctx, next) =>
     if (ctx.Request.Path.StartsWithSegments("/api/state") && ctx.Request.Headers.ContainsKey("X-PhoneBox-App"))
         Interlocked.Exchange(ref ApprovalStore.PhoneLastSeen, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
     if (ctx.Request.Headers.TryGetValue("X-PhoneBox-Device", out var device))
-        PhoneRegistry.Touch(device.ToString(), ctx.Request.Headers["X-PhoneBox-Model"].ToString(), ctx.Connection.LocalPort == Port ? "USB" : "Wi-Fi");
+    {
+        var problem = PhoneRegistry.Touch(device.ToString(), ctx.Request.Headers["X-PhoneBox-Model"].ToString(),
+            ctx.Connection.LocalPort == Port ? "USB" : "Wi-Fi", ctx.Request.Headers["X-PhoneBox-WebView"].ToString());
+        if (problem is not null) app.Logger.LogWarning("WebView: {Problem}", problem);
+    }
     if (ctx.Request.Headers.TryGetValue("X-PhoneBox-App", out var appVersion) && appVersion.ToString().Length is > 0 and < 32)
         UpdateService.AppVersion = appVersion.ToString();
     ctx.Response.Headers.CacheControl = "no-store";
@@ -272,6 +276,7 @@ app.MapGet("/api/info", (AdbReverse adb, ConfigStore cfg) => Results.Json(new
     devices = adb.AllDevices,
     appMissing = adb.MissingApp,
     usbProblem = adb.UsbProblem,
+    webviewProblem = WebViewDoctor.DiagnoseRecent(PhoneRegistry.All(), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
 }));
 
 app.MapPost("/api/phone/open", async (AdbReverse adb) => { await adb.OpenPanelAsync(); return Results.Ok(); });
@@ -490,6 +495,8 @@ app.MapGet("/api/phones", (ConfigStore cfg) =>
         model = seen.TryGetValue(id, out var s) ? s.Model : null,
         lastSeen = s?.LastSeen,
         via = s?.Via,
+        webView = s?.WebView,
+        webviewProblem = s is null ? null : WebViewDoctor.Diagnose(s.WebView, s.Model),
         name = c.Phones.FirstOrDefault(p => p.Id == id)?.Name,
         pages = c.Phones.FirstOrDefault(p => p.Id == id)?.Pages,
     }).OrderByDescending(p => p.lastSeen ?? 0));
@@ -526,13 +533,15 @@ app.MapPost("/api/volume", (int? level, string? op, AudioControl audio) =>
     return ok ? Results.Json(audio.Snapshot()) : Results.BadRequest();
 });
 
-app.MapGet("/api/quotas", (QuotaMonitor q) => Results.Json(new { providers = q.Snapshot() }));
+app.MapGet("/api/quotas", (QuotaMonitor q) => Results.Json(new { providers = q.Snapshot(), overview = q.Overview() }));
 
 app.MapGet("/api/work", (SessionMonitor s, GitHubMonitor gh) => Results.Json(new
 {
     sessions = s.Snapshot(),
     github = gh.Snapshot(),
 }));
+
+app.MapGet("/api/proxy", (string? url, CancellationToken ct) => WidgetFeedProxy.FetchAsync(url, ct));
 
 app.MapGet("/api/procs", (ProcessMonitor procs, int? top) =>
 {

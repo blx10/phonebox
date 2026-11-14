@@ -1,4 +1,4 @@
-import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtDur, fmtMem, fmtReset, fmtTime, fmtValue, h, haptic, hist, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, ringSvg, setArtColor, setMediaState, setVolDragging, shortDur, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
+import { $, API, D, LEVEL_COLOR, LOCALE, MEDIA_HTML, METRICS, Q_STYLE, S_ORDER, ago, api, averageColor, buzz, cfg, chart, color, cssVar, emit, fillIcon, fmtClock, fmtDur, fmtHM, fmtMem, fmtReset, fmtTime, fmtValue, gpuMem, gpusOf, h, haptic, hist, hour12, keyButton, levelOf, media, metricText, online, openSheet, paceInfo, pad, prRow, pushView, quotaProviders, r1, renderStatus, ringSvg, setArtColor, setMediaState, setVolDragging, shortDur, shortGpu, store, tick, toast, volDragging, wxBlock, wxIcon } from '../main.js';
 import { W } from '../registry.js';
 import { invalidateDeckState } from './controls.js';
 
@@ -10,16 +10,18 @@ W.clock = {
   bare: true, needs: ['tick', 'state', 'weather', 'quotas', 'work'],
   create(box, { o }) {
     const status = o.status !== false ? h('div', 'status') : null;
-    const hh = h('span', 'hh', '--'), mm = h('span', 'mm', '--'), ss = h('span', 'sec');
+    const hh = h('span', 'hh', '--'), mm = h('span', 'mm', '--'), ss = h('span', 'sec'), ap = h('span', 'ap');
     const date = o.date !== false ? h('div', 'date') : null;
     const wx = o.weather !== false ? wxBlock() : null;
-    box.append(status || '', h('div', 'clock', hh, h('span', 'colon', ':'), mm, ss), date || '', wx || '');
+    box.append(status || '', h('div', 'clock', hh, h('span', 'colon', ':'), mm, ss, ap), date || '', wx || '');
     box.style.setProperty('--tf', (0.84 - (status ? 0.1 : 0) - (date ? 0.11 : 0) - (wx ? 0.2 : 0)).toFixed(2));
     return {
       update(kind) {
         if (kind === 'tick') {
           const now = new Date();
-          hh.textContent = pad(now.getHours());
+          const H = now.getHours(), h12 = hour12();
+          hh.textContent = h12 ? String(H % 12 || 12) : pad(H);
+          ap.textContent = h12 ? (H < 12 ? 'AM' : 'PM') : '';
           mm.textContent = pad(now.getMinutes());
           ss.textContent = cfg.display?.showSeconds === false ? '' : pad(now.getSeconds());
           if (date) date.textContent = now.toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long' });
@@ -231,7 +233,7 @@ W.gauge = {
         if (!s) return;
         const raw = m.pct ? m.pct(s) : m.val(s);
         const p = raw == null ? 0 : (raw / (m.pct ? 100 : m.max(s))) * 100;
-        const warn = (o.metric || 'cpu').includes('temp') ? (raw > 85 ? '#ef4444' : raw > 75 ? '#f59e0b' : '') : (p >= 95 ? '#ef4444' : p >= 85 ? '#f59e0b' : '');
+        const warn = m.hot ? (raw > m.hot[1] ? '#ef4444' : raw > m.hot[0] ? '#f59e0b' : '') : (p >= 95 ? '#ef4444' : p >= 85 ? '#f59e0b' : '');
         dial.style.setProperty('--qc', warn || 'var(--q)');
         if (svg) svg.remove();
         dial.insertAdjacentHTML('afterbegin', ringSvg(p));
@@ -300,8 +302,13 @@ W.meters = {
         const s = pc.uptimeSec, d = Math.floor(s / 86400), hr = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
         up.textContent = 'Up ' + (d ? `${d} d ${hr} h` : hr ? `${hr} h ${m} min` : `${m} min`);
         const rows = [meter('RAM', `${r1(pc.ramUsedGb)} / ${Math.round(pc.ramTotalGb)} GB`, (pc.ramUsedGb / pc.ramTotalGb) * 100)];
-        const g = pc.gpu;
-        if (g && g.vramTotal) rows.push(meter('VRAM', `${r1(g.vramUsed)} / ${Math.round(g.vramTotal)} GB`, (g.vramUsed / g.vramTotal) * 100, cssVar('--gpu')));
+        // one row per GPU (the integrated one counts its shared memory); named once there is more than one
+        const gpus = gpusOf(D.state);
+        for (const g of gpus) {
+          const m = gpuMem(g);
+          if (m) rows.push(meter(gpus.length > 1 ? `${m.label === 'VRAM' ? 'VRAM' : 'GPU'} · ${shortGpu(g.name)}` : m.label === 'VRAM' ? 'VRAM' : 'GPU MEMORY',
+            `${r1(m.used)} / ${Math.round(m.total)} GB`, (m.used / m.total) * 100, cssVar('--gpu')));
+        }
         const disks = h('div', 'disks', ...(pc.disks || []).map((dk) => meter(dk.name === '/' ? 'DISK' : dk.name, Math.round((dk.usedGb / dk.totalGb) * 100) + '%', (dk.usedGb / dk.totalGb) * 100, '#94a3b8')));
         list.replaceChildren(...rows, disks);
       },
@@ -348,10 +355,65 @@ W.quotas = {
       return ['claude', 'codex', 'antigravity'];
     };
 
+    const isOverviewEnabled = () => o.showOverview === true;
+
+    const getItems = () => {
+      const want = getProviders();
+      const items = quotaProviders().filter((p) => want.includes(p.id));
+      if (isOverviewEnabled() && D.quotas?.overview) {
+        return [{ id: '__overview__', isOverview: true, overview: D.quotas.overview }, ...items];
+      }
+      return items;
+    };
+
+    const fmtCurrency = (amount, code = 'USD') => {
+      const n = Number(amount || 0);
+      const cur = (code || 'USD').toUpperCase();
+      try { return new Intl.NumberFormat(LOCALE, { style: 'currency', currency: cur }).format(n); }
+      catch (_) { return `${cur === 'USD' ? '$' : cur + ' '}${n.toFixed(2)}`; }
+    };
+
+    const renderOverviewCard = (ov, flexVal) => {
+      const card = h('div', 'q-card q-overview-card');
+      card.style.setProperty('--q', '#f97316');
+      card.style.flex = flexVal;
+      const days = ov.windowDays || 30;
+      const age = ov.updatedAt ? Math.max(0, Date.now() - ov.updatedAt) : null;
+      const updStr = age != null ? `checked ${age < 60_000 ? 'just now' : fmtDur(age) + ' ago'}` : '';
+      card.appendChild(h('div', 'q-head',
+        h('span', 'q-logo', '📊'),
+        h('span', 'q-name', 'Overview'),
+        h('span', 'q-plan', `${days}-day spend`),
+        updStr ? h('span', 'q-upd', updStr) : null
+      ));
+      const summary = h('div', 'q-ov-hero',
+        h('div', 'q-ov-stat', h('span', 'q-ov-lbl', 'Estimated spend'), h('strong', 'q-ov-val', fmtCurrency(ov.totalCost, ov.currencyCode))),
+        h('div', 'q-ov-stat', h('span', 'q-ov-lbl', 'Recorded tokens'), h('strong', 'q-ov-val', tokens(ov.totalTokens || 0)))
+      );
+      card.appendChild(summary);
+      const details = h('div', 'q-details q-ov-details');
+      for (const s of (ov.subscriptions || []).slice(0, 3)) {
+        details.appendChild(h('div', 'q-detail',
+          h('span', null, s.name),
+          h('strong', null, `${tokens(s.tokens)} · ${fmtCurrency(s.cost, s.currencyCode || ov.currencyCode)}`)
+        ));
+      }
+      for (const m of (ov.topModels || []).slice(0, 2)) {
+        details.appendChild(h('div', 'q-detail q-breakdown',
+          h('span', null, m.modelName || m.name),
+          h('strong', null, fmtCurrency(m.cost, m.currencyCode || ov.currencyCode))
+        ));
+      }
+      if (details.childNodes.length) card.appendChild(details);
+      const count = ov.providerCount ?? (ov.subscriptions || []).length;
+      card.appendChild(h('div', 'q-foot', h('span', null, `${count} ${count === 1 ? 'provider' : 'providers'}`), h('span')));
+      return card;
+    };
+
     const render = () => {
       if (!D.quotas) return;
       const want = getProviders();
-      const list = quotaProviders().filter((p) => want.includes(p.id));
+      const list = getItems();
       grid.replaceChildren();
       if (!list.length) { grid.appendChild(h('div', 'empty', want.length ? 'Quota data is unavailable for the selected providers' : 'No quota providers enabled')); return; }
 
@@ -368,6 +430,10 @@ W.quotas = {
       }
 
       for (const p of visible) {
+        if (p.isOverview) {
+          grid.appendChild(renderOverviewCard(p.overview, needsPaging && ps === 2 ? '1 1 0' : '1.5'));
+          continue;
+        }
         const st = Q_STYLE[p.id] || { color: '#94a3b8', logo: '●' };
         const card = h('div', 'q-card' + (p.limits.length >= 4 ? ' q-card-compact' : ''));
         card.style.setProperty('--q', st.color);
@@ -387,7 +453,7 @@ W.quotas = {
           else if (l.percent >= 80 || l.severity === 'warning') dial.style.setProperty('--qc', '#f59e0b');
           dial.innerHTML = ringSvg(l.percent, pace?.elapsed); // numbers only
           const pctEl = h('div', 'q-pct', String(Math.round(l.percent)), h('small', null, '%'));
-          if (compact) pctEl.style.fontSize = '22px';
+          if (compact) pctEl.style.fontSize = 'calc(22px * var(--widget-font-scale, 1))';
           dial.appendChild(pctEl);
           rings.appendChild(h('div', 'q-ring', dial, h('div', 'q-label', l.label), p.id === 'codex' ? h('div', 'q-left', `${Math.max(0, Math.round(100 - l.percent))}% left`) : null, h('div', 'q-reset', fmtReset(l.resetsAt)),
             pace ? h('div', 'q-pace ' + pace.cls, pace.text) : null));
@@ -427,8 +493,7 @@ W.quotas = {
 
     grid.onclick = () => {
       const ps = getPageSize();
-      const want = getProviders();
-      const list = quotaProviders().filter((p) => want.includes(p.id));
+      const list = getItems();
       if (ps > 0 && list.length > ps) {
         offset = (offset + 1) % list.length;
         lastRotate = Date.now();
@@ -443,8 +508,7 @@ W.quotas = {
           const sec = getRotateInterval();
           if (sec > 0 && Date.now() - lastRotate >= sec * 1000) {
             const ps = getPageSize();
-            const want = getProviders();
-            const list = quotaProviders().filter((p) => want.includes(p.id));
+            const list = getItems();
             if (ps > 0 && list.length > ps) {
               offset = (offset + 1) % list.length;
               lastRotate = Date.now();
@@ -676,10 +740,12 @@ W.worldclock = {
         const now = new Date();
         const localUtc = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes());
         row.classList.toggle('vert', box.clientHeight > box.clientWidth * 1.1);
+        row.classList.toggle('h12', hour12());
         for (const it of items) {
           if (!it.fmt) continue;
           const p = Object.fromEntries(it.fmt.formatToParts(now).map((x) => [x.type, x.value]));
-          it.t.textContent = `${p.hour}:${p.minute}`;
+          const [hm, ap] = fmtClock(+p.hour % 24, +p.minute).split(' ');
+          it.t.replaceChildren(hm, ap ? h('span', 'wc-ap', ' ' + ap) : '');
           const zoneUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
           const diffH = Math.round((zoneUtc - localUtc) / 360000) / 10;
           const dayDiff = Math.round((Date.UTC(+p.year, +p.month - 1, +p.day) - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
@@ -793,7 +859,7 @@ W.countdown = {
     const big = h('div', 'cd-v'), sub = h('div', 'cd-s');
     box.append(h('div', 'cd-l', o.label || 'Countdown'), big, sub);
     if (Number.isNaN(target)) { big.textContent = '—'; sub.textContent = 'Set a date as YYYY-MM-DD HH:MM'; return {}; }
-    sub.textContent = new Date(target).toLocaleString(LOCALE, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    sub.textContent = new Date(target).toLocaleDateString(LOCALE, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) + ', ' + fmtHM(new Date(target));
     return {
       update() {
         let d = target - Date.now();
