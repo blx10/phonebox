@@ -82,6 +82,8 @@
       phones: [], calendars: [],
       homeAssistant: { url: null, token: null },
       obs: { enabled: true, url: 'ws://127.0.0.1:4455', password: null },
+      speech: { enabled: false, provider: 'auto', language: 'en-US', maxRecordSec: 90, appleOnDevice: false,
+        saveTranscripts: false, transcriptDir: '', transcriptFormat: 'daily-md', saveAudioCopy: false, historyLimit: 15 },
     };
     c = JSON.parse(JSON.stringify(c, (_, v) => v === null ? undefined : v)); // the agent leaves unset (null) settings out
     store.set('pb-demo-config', c);
@@ -99,8 +101,16 @@
   const isObs = (type) => type === 'obs' || type.startsWith('obs-');
 
   // What the agent sends to a phone (AgentConfig.ToPublic): no commands, keys, tokens or what a rule matches on.
+  const SPEECH_PUBLIC_KEYS = new Set(['title', 'provider', 'language', 'mode', 'noteTarget', 'noteMode', 'autoAppendNote', 'saveTranscript', 'control']);
+  const scrubSpeech = (opts) => opts ? Object.fromEntries(Object.entries(opts).filter(([k]) => SPEECH_PUBLIC_KEYS.has(k))) : null;
   function publicConfig(c) {
-    const options = (w) => w.type === 'command' ? Object.fromEntries(Object.entries(w.options || {}).filter(([k]) => k === 'title' || k === 'interval')) : w.options ?? null;
+    const options = (w) => {
+      if (w.type === 'command') return Object.fromEntries(Object.entries(w.options || {}).filter(([k]) => k === 'title' || k === 'interval'));
+      if (w.type === 'speech') return scrubSpeech(w.options);
+      if (w.type === 'stack' && Array.isArray(w.options?.widgets))
+        return { ...w.options, widgets: w.options.widgets.map((cw) => cw?.type === 'speech' ? { ...cw, options: scrubSpeech(cw.options) } : cw) };
+      return w.options ?? null;
+    };
     return {
       weather: c.weather, codexBar: c.codexBar, night: c.night, display: c.display,
       pages: (c.pages || []).map((p) => ({ id: p.id, title: p.title, icon: p.icon, enabled: p.enabled !== false, idleSec: p.idleSec ?? null, appearance: p.appearance ?? null,
@@ -578,6 +588,7 @@
     if (path.startsWith('/api/goto/') && method === 'POST')
       return json(emit('goto', { page: decodeURIComponent(path.slice(10)), countdown: q.has('countdown') ? Math.max(0, Math.min(30, +q.get('countdown') || 0)) : null }));
     if (path === '/api/refresh' && method === 'POST') return json(emit('refresh'));
+    if (path.startsWith('/api/speech/')) return jsonResSpeech(await handleSpeech(method, path, q, body, await config()));
     // settings page
     if (path === '/api/catalog') return json(await loadCatalog());
     if (path === '/api/settings') {
@@ -602,6 +613,181 @@
     if (path === '/api/claude/hook') return json({ installed: false, path: '~/.claude/settings.json' });
     if (method !== 'GET') return json({ ok: true });
     return json({ error: 'not in the demo' }, 404);
+  }
+
+  // ---- Speech to text interactive demo state
+  const speech = { status: 'idle', activeWidgetId: null, activeProvider: null, startedAt: 0, entries: [], seq: 0 };
+  const speechShortPath = (raw) => String(raw || '').trim().replace(/^\/Users\/demo(?=\/|$)/, '~');
+  const jsonResSpeech = ([payload, code = 200]) => json(payload, code);
+  const speechTarget = (c, opts) => {
+    const dir = (opts?.transcriptDir || '').trim() || (c.speech?.transcriptDir || '').trim() || '/Users/demo/Documents/PhoneBox/Transcripts';
+    const day = new Date().toISOString().slice(0, 10), fmt = c.speech?.transcriptFormat || 'daily-md';
+    const file = fmt === 'daily-txt' ? `${day}.txt` : fmt === 'single-md' ? 'transcripts.md'
+      : fmt === 'per-item-txt' ? '<timestamp>.txt' : fmt === 'jsonl' ? 'transcripts.jsonl' : `${day}.md`;
+    return speechShortPath(`${dir.replace(/\/+$/, '')}/${file}`);
+  };
+  const findSpeechWidget = (c, wid) => {
+    const trimmed = String(wid || '').trim();
+    if (!trimmed) return { found: false, ambiguous: false };
+    const slash = trimmed.indexOf('/'), wantedPage = slash > 0 ? trimmed.slice(0, slash) : null;
+    const localId = slash > 0 ? trimmed.slice(slash + 1) : trimmed, colon = localId.indexOf(':');
+    const matches = [];
+    for (const p of c.pages || []) {
+      if (wantedPage && p.id !== wantedPage) continue;
+      if (!wantedPage && p.enabled === false) continue;
+      for (const w of p.widgets || []) {
+        if (w.type === 'speech' && w.id === localId)
+          matches.push({ pageId: p.id, canonicalId: `${p.id}/${w.id}`, opts: w.options || {}, enabled: p.enabled !== false });
+        if (w.type === 'stack' && colon > 0 && w.id === localId.slice(0, colon)) {
+          const cid = localId.slice(colon + 1);
+          (w.options?.widgets || []).forEach((cw, i) => {
+            const id = cw?.id || ('card-' + i);
+            if (cw?.type === 'speech' && id === cid)
+              matches.push({ pageId: p.id, canonicalId: `${p.id}/${w.id}:${id}`, opts: cw.options || {},
+                enabled: p.enabled !== false && cw.enabled !== false && cw.active !== false });
+          });
+        }
+      }
+    }
+    if (matches.length > 1) return { found: false, ambiguous: true };
+    return matches.length === 1 ? { found: true, ...matches[0] } : { found: false, ambiguous: false };
+  };
+  const appendSpeechNote = (c, text, spec, sourcePageId, noteMode) => {
+    const raw = String(spec || '').trim();
+    if (!raw) return null;
+    let targetPage = null, targetWidget = null;
+    const pickFromPage = (p, wid) => {
+      for (const w of p.widgets || []) {
+        if (wid === null && w.type === 'note') { targetPage = p; targetWidget = w; return true; }
+        if (wid === null && w.type === 'stack') {
+          const cw = (w.options?.widgets || []).find((x) => x?.type === 'note' && x.enabled !== false && x.active !== false);
+          if (cw) { targetPage = p; targetWidget = cw; return true; }
+        }
+        if (wid !== null && w.type === 'note' && w.id === wid) { targetPage = p; targetWidget = w; return true; }
+        if (wid !== null && w.type === 'stack' && wid.includes(':')) {
+          const [sid, cid] = wid.split(':');
+          if (w.id === sid) {
+            const cw = (w.options?.widgets || []).find((x, i) => x?.type === 'note' && x.enabled !== false && x.active !== false && (x.id || ('card-' + i)) === cid);
+            if (cw) { targetPage = p; targetWidget = cw; return true; }
+          }
+        }
+      }
+      return false;
+    };
+    if (raw === 'first') {
+      const scan = [...(sourcePageId ? (c.pages || []).filter((p) => p.id === sourcePageId) : []), ...(c.pages || [])];
+      scan.some((p) => p.enabled !== false && pickFromPage(p, null));
+    } else {
+      const slash = raw.indexOf('/'), pid = slash > 0 ? raw.slice(0, slash) : null, wid = slash > 0 ? raw.slice(slash + 1) : raw;
+      (c.pages || []).some((p) => (!pid || p.id === pid) && pickFromPage(p, wid));
+    }
+    if (!targetWidget) return null;
+    targetWidget.options ??= {};
+    const prev = String(targetWidget.options.text || '');
+    const clean = (prev === 'Write something here…' || prev === 'Write something here...') ? '' : prev.trimEnd();
+    const chunk = noteMode === 'bullet' ? `• ${text}` : noteMode === 'timestamp' ? `[12:00] ${text}` : text;
+    targetWidget.options.text = (noteMode === 'replace' || !clean) ? chunk : (noteMode === 'prepend' ? `${chunk}\n${clean}` : `${clean}\n${chunk}`);
+    store.set('pb-demo-config', c);
+    store.set('pb-demo-version', cfgVersion() + 1);
+    emit('refresh');
+    return `${targetPage.id}/${targetWidget.id || 'note'}`;
+  };
+  const speechState = (c) => {
+    const widgetTargets = {};
+    const addTarget = (key, opts) => {
+      const policy = opts?.saveTranscript || 'default';
+      widgetTargets[key] = { saveEnabled: policy === 'always' || (policy !== 'never' && !!c.speech?.saveTranscripts), saveTargetDisplay: speechTarget(c, opts) };
+    };
+    for (const p of c.pages || []) {
+      for (const w of p.widgets || []) {
+        if (w.type === 'speech') addTarget(`${p.id}/${w.id}`, w.options);
+        if (w.type === 'stack') (w.options?.widgets || []).forEach((cw, i) => { if (cw?.type === 'speech') addTarget(`${p.id}/${w.id}:${cw.id || ('card-' + i)}`, cw.options); });
+      }
+    }
+    return {
+      status: speech.status, activeWidgetId: speech.activeWidgetId, activeProvider: speech.activeProvider,
+      startedAtUnixMs: speech.startedAt || 0, elapsedMs: speech.status === 'recording' ? Math.max(0, Date.now() - speech.startedAt) : 0,
+      maxRecordSec: c.speech?.maxRecordSec || 90, defaultProvider: c.speech?.provider || 'auto',
+      appleAvailable: true, lastError: null, entries: speech.entries.slice(0, c.speech?.historyLimit || 15),
+      defaultSaveTranscripts: !!c.speech?.saveTranscripts,
+      defaultTranscriptDir: speechShortPath((c.speech?.transcriptDir || '').trim() || '/Users/demo/Documents/PhoneBox/Transcripts'),
+      widgetTargets,
+    };
+  };
+  async function handleSpeech(method, path, q, body, c) {
+    if (path === '/api/speech/setup-status') return [{
+      platform: 'macos', appleSupported: true, appleStatus: { available: true, onDeviceSupported: true, speechAuth: 'authorized', micAuth: 'authorized' },
+      ffmpegFound: true, micCaptureAvailable: true, whisperCliPath: '/opt/homebrew/bin/mlx_whisper',
+      defaultTranscriptDir: '/Users/demo/Documents/PhoneBox/Transcripts',
+      saveTranscripts: !!c.speech?.saveTranscripts, transcriptDir: c.speech?.transcriptDir || '/Users/demo/Documents/PhoneBox/Transcripts',
+    }];
+    if (path === '/api/speech/browse-dirs' && method === 'POST') {
+      const reqPath = (parse(body) || {}).path || '/Users/demo/Documents';
+      return [{ ok: true, currentPath: reqPath, parentPath: reqPath === '/' ? null : reqPath.split('/').slice(0, -1).join('/') || '/',
+        defaultPath: '/Users/demo/Documents/PhoneBox/Transcripts', writable: true,
+        presets: [{ name: 'Default', path: '/Users/demo/Documents/PhoneBox/Transcripts' }, { name: 'Documents', path: '/Users/demo/Documents' }],
+        entries: [{ name: 'PhoneBox', path: '/Users/demo/Documents/PhoneBox' }, { name: 'Notes', path: '/Users/demo/Documents/Notes' }] }];
+    }
+    if (path === '/api/speech/test' && method === 'POST')
+      return [{ ok: true, provider: 'apple', message: 'Apple Speech ready (speech=authorized, mic=authorized)' }];
+    if (!c.speech?.enabled) return [{ ok: false, error: 'Speech to text is disabled in Settings.' }, 404];
+    if (path === '/api/speech/state') return [speechState(c)];
+    if (path === '/api/speech/start' && method === 'POST') {
+      const found = findSpeechWidget(c, q.get('widgetId') || '');
+      if (!found.found) return [{ ok: false, error: found.ambiguous ? 'Ambiguous widgetId' : 'Not found', state: speechState(c) }, found.ambiguous ? 400 : 404];
+      if (!found.enabled || found.opts.control !== true) return [{ ok: false, error: 'Widget control is disabled in Settings.', state: speechState(c) }, 403];
+      if (speech.status !== 'idle') return [{ ok: false, error: 'Already recording', state: speechState(c) }, 409];
+      speech.status = 'recording';
+      speech.activeWidgetId = found.canonicalId;
+      speech.activeProvider = (found.opts.provider && found.opts.provider !== 'default') ? found.opts.provider : (c.speech?.provider || 'auto');
+      speech.startedAt = Date.now();
+      emit('speech');
+      return [{ ok: true, state: speechState(c) }];
+    }
+    if (path === '/api/speech/stop' && method === 'POST') {
+      if (speech.status !== 'recording') return [{ ok: false, error: 'Not recording', state: speechState(c) }, 409];
+      const found = findSpeechWidget(c, q.get('widgetId') || speech.activeWidgetId || ''), canonicalWid = speech.activeWidgetId || found.canonicalId || '';
+      const text = `Dictated memo #${++speech.seq}`, policy = found.opts?.saveTranscript || 'default';
+      const shouldSave = policy === 'always' || (policy !== 'never' && !!c.speech?.saveTranscripts);
+      let appendedToNote = false, noteTarget = found.opts?.noteTarget || null;
+      if (found.opts?.autoAppendNote && found.opts?.noteTarget) {
+        const resTarget = appendSpeechNote(c, text, found.opts.noteTarget, found.pageId, found.opts.noteMode || 'append');
+        if (resTarget) { appendedToNote = true; noteTarget = resTarget; }
+      }
+      speech.entries.unshift({
+        id: 'demo-' + speech.seq, text, provider: speech.activeProvider || 'apple', language: found.opts?.language || c.speech?.language || 'en-US',
+        createdAt: new Date().toISOString(), durationMs: Math.max(400, Date.now() - (speech.startedAt || Date.now())),
+        savedFileDisplay: shouldSave ? speechTarget(c, found.opts) : null, noteTarget, appendedToNote, widgetId: canonicalWid,
+      });
+      Object.assign(speech, { status: 'idle', activeWidgetId: null, activeProvider: null, startedAt: 0 });
+      emit('speech');
+      return [{ ok: true, state: speechState(c) }];
+    }
+    if (path === '/api/speech/cancel' && method === 'POST') {
+      Object.assign(speech, { status: 'idle', activeWidgetId: null, activeProvider: null, startedAt: 0 });
+      emit('speech');
+      return [{ ok: true, state: speechState(c) }];
+    }
+    if (path === '/api/speech/append-note' && method === 'POST') {
+      const entry = speech.entries.find((e) => e.id === q.get('entryId'));
+      if (!entry) return [{ ok: false, error: 'Entry not found', state: speechState(c) }, 404];
+      const found = findSpeechWidget(c, q.get('widgetId') || entry.widgetId);
+      if (!found.found || !found.enabled || found.opts.control !== true)
+        return [{ ok: false, error: 'Widget control is disabled in Settings.', state: speechState(c) }, 403];
+      const target = appendSpeechNote(c, entry.text, found.opts?.noteTarget || '', found.pageId, found.opts?.noteMode || 'append');
+      if (!target) return [{ ok: false, error: 'Select a Note widget target first.', state: speechState(c) }, 400];
+      entry.appendedToNote = true;
+      entry.noteTarget = target;
+      emit('speech');
+      return [{ ok: true, state: speechState(c) }];
+    }
+    if (path === '/api/speech/clear' && method === 'POST') {
+      const wid = q.get('widgetId') || '', found = findSpeechWidget(c, wid), canonical = found.found ? found.canonicalId : wid;
+      speech.entries = canonical ? speech.entries.filter((e) => e.widgetId !== canonical) : [];
+      emit('speech');
+      return [{ ok: true, state: speechState(c) }];
+    }
+    return [{ error: 'Unknown speech endpoint' }, 404];
   }
 
   window.fetch = async (input, init = {}) => {
