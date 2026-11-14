@@ -55,6 +55,27 @@ public sealed class RadioDirectoryTests
         Assert.False(RadioBrowserDirectory.IsSafePublicUri(new Uri("http://192.168.1.50/stream.mp3")));
     }
 
+    [Theory]
+    [InlineData("http://router/stream.mp3")]
+    [InlineData("http://nas.lan/radio")]
+    [InlineData("http://printer.home.arpa/x")]
+    [InlineData("http://media.internal:8000/live")]
+    [InlineData("http://speaker.local/")]
+    [InlineData("http://LOCALHOST./a")]
+    [InlineData("http://192.168.1.1.nip.io/live")]
+    [InlineData("http://10-0-0-7.sslip.io/live")]
+    [InlineData("http://app.127.0.0.1.nip.io/x")]
+    public void HostnamesThatPointIntoTheHomeNetworkAreNotImported(string url) =>
+        Assert.False(RadioBrowserDirectory.IsSafePublicUri(new Uri(url)));
+
+    [Theory]
+    [InlineData("https://stream.example.com/live.mp3")]
+    [InlineData("http://ice1.somafm.com/groovesalad-128-mp3")]
+    [InlineData("https://8.8.8.8.nip.io/live")]
+    [InlineData("https://radio-2024.example.org/128")]
+    public void PublicStreamHostsAreImported(string url) =>
+        Assert.True(RadioBrowserDirectory.IsSafePublicUri(new Uri(url)));
+
     [Fact]
     public async Task CheckStreamsReportsLiveAndHtmlWithoutMutatingInput()
     {

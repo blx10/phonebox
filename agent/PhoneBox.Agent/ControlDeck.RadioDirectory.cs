@@ -77,7 +77,7 @@ internal static partial class RadioBrowserDirectory
                 {
                     try
                     {
-                        var entry = await Dns.GetHostEntryAsync(ip);
+                        var entry = await Dns.GetHostEntryAsync(ip.ToString(), dnsCts.Token);
                         if (entry.HostName.EndsWith(".api.radio-browser.info", StringComparison.OrdinalIgnoreCase))
                             AddHost(entry.HostName);
                     }
@@ -207,6 +207,7 @@ internal static partial class RadioBrowserDirectory
 
     private static async Task<RadioCheckResult> ProbeSingleAsync(HttpClient http, RadioCheckItem item, CancellationToken ct)
     {
+        if (item is null) return new RadioCheckResult("", false, "Invalid URL");
         if (!Uri.TryCreate(item.StreamUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
             return new RadioCheckResult(item.Id, false, "Invalid URL");
         if (!IsSafePublicUri(uri))
@@ -276,16 +277,34 @@ internal static partial class RadioBrowserDirectory
         return null;
     }
 
+    /// <summary>
+    /// A stream URL from the public directory that may be imported: http(s) to a public address. Anyone can add a
+    /// station there, so names that resolve inside a home network are refused too: single-label hosts ("router"),
+    /// local suffixes (".lan", ".home.arpa", ".internal"…) and names that carry a private address
+    /// ("192.168.1.1.nip.io", "10-0-0-1.sslip.io"). The stream check also checks the address it connects to.
+    /// </summary>
     internal static bool IsSafePublicUri(Uri uri)
     {
         if (uri.Scheme is not ("http" or "https")) return false;
-        var host = uri.DnsSafeHost;
-        if (string.IsNullOrWhiteSpace(host) || host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".local", StringComparison.OrdinalIgnoreCase))
-            return false;
+        var host = uri.DnsSafeHost.TrimEnd('.');
+        if (string.IsNullOrWhiteSpace(host)) return false;
         if (IPAddress.TryParse(host, out var ip))
             return IsPublicIpAddress(ip);
+        if (!host.Contains('.')) return false;
+        foreach (var suffix in LocalSuffixes)
+            if (host.Equals(suffix[1..], StringComparison.OrdinalIgnoreCase) || host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                return false;
+        foreach (System.Text.RegularExpressions.Match m in EmbeddedIpv4().Matches(host))
+            if (IPAddress.TryParse(m.Value.Replace('-', '.'), out var embedded) && !IsPublicIpAddress(embedded))
+                return false;
         return true;
     }
+
+    private static readonly string[] LocalSuffixes =
+        [".localhost", ".local", ".lan", ".home", ".home.arpa", ".internal", ".intranet", ".localdomain", ".corp", ".private", ".test", ".invalid"];
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"(?<![0-9])(?:[0-9]{1,3}[.-]){3}[0-9]{1,3}(?![0-9])")]
+    private static partial System.Text.RegularExpressions.Regex EmbeddedIpv4();
 
     private static bool IsPublicIpAddress(IPAddress ip)
     {
