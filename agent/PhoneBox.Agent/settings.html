@@ -773,6 +773,13 @@ nav a.on::before { color: var(--accent); }
       </div>
 
       <div class="card">
+        <h3 data-i18n="s.antigravity.title">Antigravity sessions</h3>
+        <p class="hint" style="margin:0 0 12px" data-i18n="s.antigravity.hint">Show recent Antigravity chats on the AI sessions widget (off by default). Only step metadata and token counters are kept; prompts, replies and tool arguments are never shown, stored or sent.</p>
+        <div class="row" style="margin-bottom:8px"><label class="switch"><input type="checkbox" data-bind="antigravity.sessions"><span></span></label> <span data-i18n="s.antigravity.sessions">Show Antigravity sessions</span></div>
+        <label class="check"><input type="checkbox" data-bind="antigravity.shareSessionTitles"> <span data-i18n="s.antigravity.shareSessionTitles">Show Antigravity chat titles on the phone (Antigravity draws them from the conversation)</span></label>
+      </div>
+
+      <div class="card">
         <h3 data-i18n="s.approvals.title">AI coding agent permission prompts</h3>
         <p class="hint" style="margin:0 0 12px" data-i18n-html="s.approvals.hint">When Codex or Claude Code asks for permission, the phone shows the request with <b>Allow</b> and <b>Deny</b>. Install the hook for each agent you use; existing hook files are preserved and backed up.</p>
         <div class="row" style="margin-bottom:8px"><b style="min-width:92px" data-i18n="s.approvals.codex">Codex</b><button class="btn" id="codexHookBtn" data-i18n="s.claude.installHook">Install hook</button><span class="hint" id="codexHookState"></span></div>

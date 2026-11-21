@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace PhoneBox.Agent;
 
 /// <param name="Status">busy | waiting | shell | idle</param>
-/// <param name="Title">The chat's title: carried only while the user shares session titles — Claude Code's own setting, or "Show OpenCode session titles" for OpenCode.</param>
+/// <param name="Title">The chat's title: carried only while the user shares session titles — Claude Code's own setting, "Show OpenCode session titles" for OpenCode, or "Show Antigravity chat titles on the phone" for Antigravity.</param>
 public sealed record AgentSession(string Id, string Tool, string Name, string Project, string Status,
     string? WaitingFor, long Since, long StartedAt, int? Pid = null,
     string? Model = null, string? Effort = null, long? TotalTokens = null, long? InputTokens = null,
@@ -19,9 +19,10 @@ public sealed record AgentSession(string Id, string Tool, string Name, string Pr
 ///  - Claude Code: ~/.claude/sessions/{pid}.json (status files written by Claude Code itself)
 ///  - Codex: the latest events in recent rollout files under ~/.codex/sessions
 ///  - Cursor (opt-in): recent agent transcripts under ~/.cursor/projects/*/agent-transcripts
+///  - Antigravity (opt-in): recent user transcripts under ~/.gemini/antigravity/brain and ~/.gemini/antigravity-cli/brain
 ///  - OpenCode: recent sessions from the local HTTP API of its background service (native and in WSL)
 /// </summary>
-public sealed class SessionMonitor(ILogger<SessionMonitor> log, ConfigStore? config = null) : BackgroundService
+public sealed partial class SessionMonitor(ILogger<SessionMonitor> log, ConfigStore? config = null) : BackgroundService
 {
     private static readonly string Home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     private readonly ConcurrentDictionary<string, string> _codexCwd = new();
@@ -40,8 +41,9 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log, ConfigStore? con
     /// <summary>
     /// The sessions, for everything that sends them anywhere (the live stream, /api/work, the rules). This is the one
     /// place they leave this class, so the title settings are applied here: Claude Code's chats carry a title only
-    /// while Settings › Claude Code › "Show session titles on the phone" is on, and OpenCode's only while
-    /// Settings › General › "Show OpenCode session titles" is on. An OpenCode row whose sharing was just turned off
+    /// while Settings › Claude Code › "Show session titles on the phone" is on, OpenCode's only while
+    /// Settings › General › "Show OpenCode session titles" is on, and Antigravity's only while
+    /// Settings › General › "Show Antigravity chat titles on the phone" is on. An OpenCode row whose sharing was just turned off
     /// also loses the title from its Name — the reader puts the short session id there when titles are off, and the
     /// next monitor refresh (about two seconds) does the same; until then this keeps the title off the phone.
     /// </summary>
@@ -51,11 +53,13 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log, ConfigStore? con
         if (!all.Any(s => s.Title is not null)) return all;
         var claude = ShareTitles;
         var opencode = config?.Get().OpenCode.ShareSessionTitles ?? false;
-        if (claude && opencode) return all;
+        var antigravity = config?.Get().Antigravity.ShareSessionTitles ?? false;
+        if (claude && opencode && antigravity) return all;
         return all.Select(s => s.Tool switch
         {
             "claude" when !claude => s with { Title = null },
             "opencode" when !opencode => s with { Title = null, Name = OpenCodeSessions.ShortId(s.Id["opencode:".Length..]) },
+            "antigravity" when !antigravity => s with { Title = null },
             _ => s,
         }).ToList();
     }
@@ -87,6 +91,16 @@ public sealed class SessionMonitor(ILogger<SessionMonitor> log, ConfigStore? con
             if (config?.Get().Cursor.Sessions == true)
             {
                 try { list.AddRange(ReadCursor()); } catch (Exception ex) { log.LogDebug("cursor sessions: {Msg}", ex.Message); }
+            }
+            // Antigravity sessions are off until Settings › General › Antigravity sessions is enabled.
+            if (config?.Get().Antigravity.Sessions == true)
+            {
+                try { list.AddRange(ReadAntigravity(titles: config!.Get().Antigravity.ShareSessionTitles)); }
+                catch (Exception ex) { log.LogDebug("antigravity sessions: {Msg}", ex.Message); }
+            }
+            else
+            {
+                ClearAntigravityCache();
             }
             _sessions = list;
             ClaudeTranscript.Trim(list.Where(s => s.Tool == "claude").Select(s => s.Id["claude:".Length..]), config?.Get().Claude.ShareConversation ?? false);

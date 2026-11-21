@@ -210,5 +210,19 @@ public sealed class SessionTitleTests : IDisposable
         Assert.Equal("ses_1", second3.Name); // the short id the reader uses, never the title
     }
 
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void AntigravityTitlesFollowTheirOwnSwitch(bool? setting, bool titleComesOut)
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, "config-agy-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, setting is null ? "{}" : "{\"antigravity\":{\"shareSessionTitles\":" + (setting.Value ? "true" : "false") + "}}");
+        var agy = new AgentSession("antigravity:conv-1", "antigravity", "antigravity-conv", "Antigravity", "idle", null, 1, 1, Title: Title);
+        var monitor = new SessionMonitor(NullLogger<SessionMonitor>.Instance, new ConfigStore(path)) { Sessions = [agy] };
+        Assert.Equal(titleComesOut ? Title : null, Assert.Single(monitor.Snapshot()).Title);
+    }
+
     public void Dispose() { try { Directory.Delete(_root, true); } catch { } }
 }

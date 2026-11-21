@@ -46,6 +46,13 @@ Last updated: 2026-11-20 (PhoneBox 0.9.6).
   the panel; chat text is never shown, stored or sent. Project labels use the folder basename from Cursor's
   `workspaceStorage/*/workspace.json` `folder` URI (cached about a minute), sent to the phone as the session's project
   name over the same local USB / paired Wi-Fi link as other panel data. Turning the setting off stops the scan.
+- **Antigravity sessions** (off by default; **Settings › General › Antigravity sessions**): while enabled, the agent
+  scans recent `transcript.jsonl` files under `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-cli/brain`
+  (about every 30 seconds for discovery) together with local `annotations/*.pbtxt` metadata and the Antigravity CLI's
+  `history.jsonl` workspace basename. Only step types, statuses, timestamps, model names, tool names and token counters
+  are kept; prompts, replies, thinking and tool arguments are never shown, stored or sent. Titles reach the phone only
+  while **Show Antigravity chat titles on the phone** is also on; otherwise the widget shows the project name or
+  `Antigravity`. Turning the setting off stops the scan.
 - **OpenCode sessions (off by default):** with Settings › General › "Show OpenCode sessions" on, the agent asks
   OpenCode's own background service — the native one, and the one inside each running WSL distro — for its recent
   sessions: the same local HTTP API the desktop app uses, authenticated with the password OpenCode wrote to

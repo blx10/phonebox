@@ -41,7 +41,7 @@ Every page is a 12 × 6 grid. Start a page from one of the 30 templates (or from
 |---|---|
 | **Home** — clock, weather, now playing, CPU / GPU / RAM / network tiles | **Dashboard** — gauges, clock, media and a few shortcut keys |
 | <img src="screenshots/home.png" alt="Home"> | <img src="screenshots/dashboard.png" alt="Dashboard"> |
-| **AI quotas** — Claude and Codex limits, reset times, "at this pace: full in 1 d 5 h" | **Sessions** — Claude Code / Codex / Cursor / OpenCode sessions and GitHub |
+| **AI quotas** — Claude and Codex limits, reset times, "at this pace: full in 1 d 5 h" | **Sessions** — Claude Code / Codex / Cursor / OpenCode / Antigravity sessions and GitHub |
 | <img src="screenshots/ai.png" alt="AI quotas"> | <img src="screenshots/work.png" alt="Sessions"> |
 | **System** — CPU, GPU, memory, disks, network and ping charts | **Processes** — heaviest apps; tap one to end an instance or all of them |
 | <img src="screenshots/system.png" alt="System"> | <img src="screenshots/procs-sheet.png" alt="Processes"> |
@@ -76,7 +76,7 @@ keeps the screen on.
 | **Time** | Clock (with status line and weather) · Analog clock (any time zone) · **Word clock** · World clocks · Calendar · **Next up** · Time progress (day / week / month / year) · Countdown · Pomodoro · Quick timer · Stopwatch |
 | **Weather & sky** | Weather · Forecast (hourly / 7 days) · Sun & moon (daylight left, UV, moon phase) · **Moon** · Air quality (European AQI, PM2.5, PM10, O₃, NO₂) |
 | **Computer** | **Rules** (which hold, pause) · **Battery care** · On air (microphone / camera / OBS) · OBS Studio (live, recording, scenes) · **Dictation** (speak on the phone, typed on the PC; the app asks for the microphone on first use) · **App console** (Windows: keys and a dial for the app in front, set per app in Settings › General; use the focused app's process name from Task Manager's Details tab; packaged Store apps can all show up as `ApplicationFrameHost` and terminal tabs as `WindowsTerminal`, so a profile for those names covers all of them) · Device batteries (headphones, mice, keyboards) · Docker / Podman (containers, start / stop) · Metric tile · Gauge · Chart · GPU details · Memory & disks · Top processes · Processes · Now playing · Radio · Volume · **Spectrum bars** (Windows: a live spectrum of what the PC is playing, like the classic LED bar visualizers) · Shortcut grid · Big button (optionally filled with the shortcut's uploaded picture) · **Command** (PowerShell / bash / zsh output, refreshed every N seconds) · **Trackpad** (control PC cursor, tap to click, hold to drag, scroll) |
-| **AI & code** | AI quotas · Quota ring · AI sessions (Claude Code, Codex, Cursor, OpenCode) · GitHub |
+| **AI & code** | AI quotas · Quota ring · AI sessions (Claude Code, Codex, Cursor, OpenCode, Antigravity) · GitHub |
 | **Personal** | **Agenda** (Google / Outlook / iCloud calendars) · Note (edit it from the phone) · Checklist (resets daily) · Counter · Breathe · Quote · Title · Phone battery · **Computers** (switch between paired computers) · **Photo frame** (a slideshow from a photo folder on the PC or an Immich album) |
 | **Web & data** | **Custom HTML** (your own widget, sandboxed) · **Home Assistant** (entities with their own name and icon, tap to switch) · **Pushed value** · **Notifications** (both fed by [webhooks](#webhooks)) · **News feeds** (your RSS and Atom feeds; with its "Open articles on the PC" option, a tap opens the article on the PC) · Hacker News · Exchange rates (ECB) · Crypto prices · Image / webcam · **Camera** (a live picture from an IP camera over RTSP, pulled by ffmpeg on the PC) |
 
@@ -266,6 +266,10 @@ sessions reach the phone like the native ones, and each answer goes back to the 
 OpenCode sessions (opt-in: **Show OpenCode sessions**, off by default) show OpenCode's own session title with the
 project folder underneath once **Show OpenCode session titles** is also on (off by default: OpenCode draws the titles
 from the conversation, so they stay off the phone until you share them, like Claude Code's).
+
+Antigravity sessions (opt-in: **Settings › General › Antigravity sessions**, off by default) show recent local
+Antigravity IDE and CLI chats with their model, tool and token metadata (prompts, replies and tool arguments are never
+read or sent). Chat titles reach the phone only when **Show Antigravity chat titles on the phone** is also on.
 
 OpenCode's agent questions work the same way: when the agent asks "route A, B or C, or type your own", the phone
 shows the choices as buttons (and a text field when a custom answer is allowed) and sends the pick back. Questions

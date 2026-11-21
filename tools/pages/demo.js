@@ -66,6 +66,7 @@
       lan: { enabled: true, port: 8766, token: 'demo', webhookToken: 'demo-webhook-key' },
       updates: { auto: true, repo: 'ersinkoc/phonebox' },
       claude: { phoneApprovals: true, timeoutSec: 90, onlyWhenAway: false },
+      antigravity: { sessions: false, shareSessionTitles: false },
       opencode: { phoneApprovals: false, sessions: false, timeoutSec: 90, onlyWhenAway: false, alwaysCountdownSec: 10, watchWsl: false, shareSessionTitles: false },
       pages: PAGES.filter((id) => byId[id]).map((id) => {
         const t = byId[id], seen = {};
@@ -303,7 +304,7 @@
     return {
       sessions: [s(1, 'claude', 'api-gateway', 'busy', 4), s(2, 'claude', 'docs-site', 'waiting', 2, 'approve a file edit'), s(3, 'codex', 'mobile-app', 'busy', 11),
         s(4, 'claude', 'infra', 'shell', 1), s(5, 'claude', 'blog-engine', 'idle', 38), s(6, 'codex', 'data-pipeline', 'idle', 74), s(7, 'claude', 'design-system', 'idle', 125),
-        s(8, 'cursor', 'phonebox', 'busy', 3), s(9, 'cursor', 'fueltrack', 'idle', 1)],
+        s(8, 'cursor', 'phonebox', 'busy', 3), s(9, 'cursor', 'fueltrack', 'idle', 1), s(10, 'antigravity', 'phonebox', 'busy', 2)],
       github: { user: 'octocat', notifications: 7, error: null, updatedAt: n - 90e3,
         reviewRequests: [pr('acme/api', 412, 'Rate limiter for public endpoints', null, null, false, 'hubot'), pr('acme/web', 1288, 'Dark mode for the dashboard', null, null, false, 'monalisa'),
           pr('acme/infra', 77, 'Move staging to a new region', null, null, false, 'hubot')],

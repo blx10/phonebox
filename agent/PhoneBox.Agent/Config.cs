@@ -21,6 +21,8 @@ public sealed class AgentConfig
     public ClaudeConfig Claude { get; set; } = new();
     /// <summary>Cursor agent-transcript sessions on the AI sessions widget (off by default).</summary>
     public CursorConfig Cursor { get; set; } = new();
+    /// <summary>Antigravity chats on the AI sessions widget (off by default).</summary>
+    public AntigravityConfig Antigravity { get; set; } = new();
     /// <summary>OpenCode prompts and sessions on the phone; everything is off until the settings page turns it on.</summary>
     [JsonPropertyName("opencode")]
     public OpenCodeConfig OpenCode { get; set; } = new();
@@ -258,6 +260,14 @@ public sealed class CursorConfig
 {
     /// <summary>Show recent Cursor agent chats on the AI sessions widget (off by default).</summary>
     public bool Sessions { get; set; }
+}
+
+public sealed class AntigravityConfig
+{
+    /// <summary>Show recent Antigravity chats on the AI sessions widget (off by default).</summary>
+    public bool Sessions { get; set; }
+    /// <summary>Show each Antigravity chat's title from its local annotation file on the phone (off by default).</summary>
+    public bool ShareSessionTitles { get; set; }
 }
 
 public sealed class OpenCodeConfig
@@ -631,6 +641,7 @@ public sealed partial class ConfigStore(string path)
         c.Claude ??= new();
         c.Claude.TimeoutSec = Math.Clamp(c.Claude.TimeoutSec, 10, 3600);
         c.Cursor ??= new();
+        c.Antigravity ??= new();
         c.OpenCode ??= new();
         c.OpenCode.TimeoutSec = Math.Clamp(c.OpenCode.TimeoutSec, 10, 3600);
         c.OpenCode.AlwaysCountdownSec = Math.Clamp(c.OpenCode.AlwaysCountdownSec, 0, 60);

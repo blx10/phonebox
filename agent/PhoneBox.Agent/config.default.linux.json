@@ -21,6 +21,8 @@
   "discord": { "enabled": false, "clientId": null, "clientSecret": null },
   // Cursor agent chats on the AI sessions widget (off by default)
   "cursor": { "sessions": false },
+  // Antigravity chats on the AI sessions widget (off by default)
+  "antigravity": { "sessions": false, "shareSessionTitles": false },
   // Live Codex quotas read through the Codex CLI (off by default; Settings › General › AI quotas & CodexBar)
   "codexBar": { "codexLiveQuota": false },
   // OpenCode permission prompts on the phone: Allow (once or always) and Deny, read from OpenCode's
